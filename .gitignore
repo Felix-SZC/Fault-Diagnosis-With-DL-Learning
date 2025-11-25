@@ -25,3 +25,14 @@ __pycache__/
 
 # 忽略通过脚本生成的较大的 CSV 文件
 samples_data.csv
+
+# 忽略预处理生成的 .npy 数据文件（可以通过脚本重新生成）
+# 这些文件数量多、体积大，不应该提交到 git
+**/*.npy
+
+# 但保留 index.csv 文件（元数据，体积小且有用）
+!**/index.csv
+
+# 忽略模型检查点文件（.pth），体积大且可通过重新训练生成
+**/checkpoints/**/*.pth
+**/checkpoints/**/*.pth.tar
