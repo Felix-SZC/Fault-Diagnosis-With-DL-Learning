@@ -5,11 +5,12 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super(ResidualBlock, self).__init__()
 
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.bn1 = nn.BatchNorm1d(in_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+
         self.bn2 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
 
         self.shortcut = nn.Sequential()
 
@@ -22,18 +23,17 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         identity = x
 
-        out = self.conv1(x)
-        out = self.bn1(out)
+        out = self.bn1(x)
         out = self.relu(out)
+        out = self.conv1(out)
 
-        out = self.conv2(out)
         out = self.bn2(out)
+        out = self.relu(out)
+        out = self.conv2(out)
 
         identity_transformed = self.shortcut(identity)
 
         out += identity_transformed
-
-        out = self.relu(out)
 
         return out
 
@@ -63,25 +63,16 @@ class ResNet(nn.Module):
         self.fc = nn.Linear(16, num_classes)
         
     def forward(self, x):
-        # Conv(4, 3, /2)
         x = self.conv1(x)
-        # RBU(4, 3, /2)
         x = self.rbu1(x)
-        # RBU(4, 3)
         x = self.rbu2(x)
-        # RBU(8, 3, /2)
         x = self.rbu3(x)
-        # RBU(8, 3)
         x = self.rbu4(x)
-        # RBU(16, 3, /2)
         x = self.rbu5(x)
-        # RBU(16, 3)
         x = self.rbu6(x)
-        # BN, ReLU, GAP
         x = self.bn(x)
         x = self.relu(x)
         x = self.gap(x)
-        # FC
         x = torch.flatten(x, 1)
         x = self.fc(x)
         
