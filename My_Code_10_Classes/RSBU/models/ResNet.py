@@ -38,48 +38,54 @@ class ResidualBlock(nn.Module):
         return out
 
 class ResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, num_classes=10):
         super(ResNet, self).__init__()
-        self.in_channels = 64
         
-        self.conv1 = nn.Conv1d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm1d(64)
+        # Conv(4, 3, /2)
+        self.conv1 = nn.Conv1d(1, 4, kernel_size=3, stride=2, padding=1, bias=False)
+        # RBU(4, 3, /2)
+        self.rbu1 = ResidualBlock(4, 4, stride=2)
+        # RBU(4, 3)
+        self.rbu2 = ResidualBlock(4, 4, stride=1)
+        # RBU(8, 3, /2)
+        self.rbu3 = ResidualBlock(4, 8, stride=2)
+        # RBU(8, 3)
+        self.rbu4 = ResidualBlock(8, 8, stride=1)
+        # RBU(16, 3, /2)
+        self.rbu5 = ResidualBlock(8, 16, stride=2)
+        # RBU(16, 3)
+        self.rbu6 = ResidualBlock(16, 16, stride=1)
+        # BN, ReLU, GAP
+        self.bn = nn.BatchNorm1d(16)
         self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-
-        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
-        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-
-        self.avgpool = nn.AdaptiveAvgPool1d((1))
-        self.fc = nn.Linear(512, num_classes)
-
-
-    def _make_layer(self, block, out_channels, num_blocks, stride):
-        strides = [stride] + [1] * (num_blocks - 1)
-        layers = []
-        for s in strides:
-            layers.append(block(self.in_channels, out_channels, s))
-            self.in_channels = out_channels
-        return nn.Sequential(*layers)
+        self.gap = nn.AdaptiveAvgPool1d(1)
+        # FC
+        self.fc = nn.Linear(16, num_classes)
         
     def forward(self, x):
+        # Conv(4, 3, /2)
         x = self.conv1(x)
-        x = self.bn1(x)
+        # RBU(4, 3, /2)
+        x = self.rbu1(x)
+        # RBU(4, 3)
+        x = self.rbu2(x)
+        # RBU(8, 3, /2)
+        x = self.rbu3(x)
+        # RBU(8, 3)
+        x = self.rbu4(x)
+        # RBU(16, 3, /2)
+        x = self.rbu5(x)
+        # RBU(16, 3)
+        x = self.rbu6(x)
+        # BN, ReLU, GAP
+        x = self.bn(x)
         x = self.relu(x)
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = self.avgpool(x)
+        x = self.gap(x)
+        # FC
         x = torch.flatten(x, 1)
         x = self.fc(x)
-
+        
         return x
 
-def ResNet18(num_classes=10):
-    return ResNet(ResidualBlock, [2, 2, 2, 2], num_classes=num_classes)
+def ResNet_test(num_classes=10):
+    return ResNet(num_classes=num_classes)

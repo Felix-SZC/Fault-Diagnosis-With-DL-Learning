@@ -1,8 +1,8 @@
-from models.ResNet import ResNet18
+from models.ResNet import ResNet_test
 
 # 模型注册字典，映射模型名称到模型构造函数
 MODEL_REGISTRY = {
-    'ResNet18': ResNet18,
+    'ResNet': ResNet_test,
 }
 
 def get_model(model_config):

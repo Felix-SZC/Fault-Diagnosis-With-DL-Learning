@@ -42,8 +42,12 @@ class RawSignalDataset(Dataset):
     - 每一行 file 指向同目录下的一个 .npy 文件
     - .npy 内容为 (time_steps,) 的一维数组（例如 (1024,)）
     - __getitem__ 返回 (Tensor[1, time_steps], int_label)
+    
+    可选参数：
+    - add_noise: 是否添加高斯噪声（默认 False）
+    - noise_std: 高斯噪声的标准差（默认 0.05）
     """
-    def __init__(self, split_dir: str):
+    def __init__(self, split_dir: str, add_noise: bool = False, noise_std: float = 0.05):
         index_path = os.path.join(split_dir, 'index.csv')
         if not os.path.exists(index_path):
             raise FileNotFoundError(f'未找到索引文件: {index_path}，请先运行 make_raw_signal_dataset.py')
@@ -51,6 +55,8 @@ class RawSignalDataset(Dataset):
         self.index_df = pd.read_csv(index_path)
         if 'file' not in self.index_df.columns or 'label' not in self.index_df.columns:
             raise ValueError('index.csv 需包含列: file,label')
+        self.add_noise = add_noise
+        self.noise_std = noise_std
 
     def __len__(self):
         return len(self.index_df)
@@ -64,5 +70,11 @@ class RawSignalDataset(Dataset):
         tensor = torch.from_numpy(arr).float()
         # 添加通道维度
         tensor = tensor.unsqueeze(0)  # (time_steps,) -> (1, time_steps)
+        
+        # 如果需要添加高斯噪声
+        if self.add_noise:
+            noise = torch.randn_like(tensor) * self.noise_std
+            tensor = tensor + noise
+        
         label = int(row['label'])
         return tensor, label
