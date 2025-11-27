@@ -35,14 +35,13 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 print(f'模型将保存至: {checkpoint_dir}')
 
 print(f"从预处理目录读取: {raw_signal_output_dir}")
-# 从配置读取噪声参数
-add_noise = train_config.get('add_noise', False)
-noise_std = train_config.get('noise_std', 0.05)
-# 训练集添加噪声（如果启用），验证集不加噪声
-train_dataset = RawSignalDataset(split_dir=train_dir, add_noise=add_noise, noise_std=noise_std)
-val_dataset = RawSignalDataset(split_dir=val_dir, add_noise=False)
-if add_noise:
-    print(f"训练集已启用高斯噪声增强，噪声标准差: {noise_std}")
+# 从配置读取信噪比参数
+snr_db = train_config.get('snr_db', None)
+# 训练集按信噪比添加噪声（如果启用），验证集不加噪声
+train_dataset = RawSignalDataset(split_dir=train_dir, snr_db=snr_db)
+val_dataset = RawSignalDataset(split_dir=val_dir, snr_db=None)
+if snr_db is not None:
+    print(f"训练集已启用高斯噪声增强，目标信噪比: {snr_db} dB")
 else:
     print("训练集未启用噪声增强")
 

@@ -44,10 +44,10 @@ class RawSignalDataset(Dataset):
     - __getitem__ 返回 (Tensor[1, time_steps], int_label)
     
     可选参数：
-    - add_noise: 是否添加高斯噪声（默认 False）
-    - noise_std: 高斯噪声的标准差（默认 0.05）
+    - snr_db: 信噪比 (dB)。如果提供，则会为每个样本添加高斯噪声以达到此信噪比。
+      如果为 None，则不添加噪声。(默认: None)
     """
-    def __init__(self, split_dir: str, add_noise: bool = False, noise_std: float = 0.05):
+    def __init__(self, split_dir: str, snr_db: float = None):
         index_path = os.path.join(split_dir, 'index.csv')
         if not os.path.exists(index_path):
             raise FileNotFoundError(f'未找到索引文件: {index_path}，请先运行 make_raw_signal_dataset.py')
@@ -55,8 +55,7 @@ class RawSignalDataset(Dataset):
         self.index_df = pd.read_csv(index_path)
         if 'file' not in self.index_df.columns or 'label' not in self.index_df.columns:
             raise ValueError('index.csv 需包含列: file,label')
-        self.add_noise = add_noise
-        self.noise_std = noise_std
+        self.snr_db = snr_db
 
     def __len__(self):
         return len(self.index_df)
@@ -66,15 +65,27 @@ class RawSignalDataset(Dataset):
         path = os.path.join(self.split_dir, str(row['file']))
         # 加载单个样本（原始1D信号）
         arr = np.load(path)  # numpy.ndarray, 形状：(time_steps,)
-        # 转换为tensor并添加通道维度：(time_steps,) -> (1, time_steps)
+        # 转换为tensor
         tensor = torch.from_numpy(arr).float()
-        # 添加通道维度
-        tensor = tensor.unsqueeze(0)  # (time_steps,) -> (1, time_steps)
         
         # 如果需要添加高斯噪声
-        if self.add_noise:
-            noise = torch.randn_like(tensor) * self.noise_std
+        if self.snr_db is not None:
+            # 1. 计算信号功率
+            signal_power = torch.mean(tensor.pow(2))
+            
+            # 2. 从信噪比(dB)计算噪声功率
+            snr = 10**(self.snr_db / 10.0)
+            noise_power = signal_power / snr
+            
+            # 3. 计算噪声标准差
+            noise_std = torch.sqrt(noise_power)
+            
+            # 4. 生成并添加噪声
+            noise = torch.randn_like(tensor) * noise_std
             tensor = tensor + noise
+
+        # 添加通道维度: (time_steps,) -> (1, time_steps)
+        tensor = tensor.unsqueeze(0)
         
         label = int(row['label'])
         return tensor, label
