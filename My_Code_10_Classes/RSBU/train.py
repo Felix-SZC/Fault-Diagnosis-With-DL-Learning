@@ -55,23 +55,11 @@ print(f'使用模型: {model_type}')
 criterion = nn.CrossEntropyLoss()
 
 
-def get_lr_for_epoch(epoch: int) -> float:
-    """Return staged learning rate: [0-39]=0.1, [40-79]=0.01, [80-99]=0.001."""
-    if epoch < 20:
-        return 0.001
-    if epoch < 30:
-        return 0.005
-    return 0.0001
+# 优化器和学习率调度器
+initial_lr = train_config['learning_rate']
+optimizer = optim.SGD(model.parameters(), lr=initial_lr, momentum=0.9, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40, 80], gamma=0.1)
 
-
-def set_optimizer_lr(optimizer: optim.Optimizer, lr: float) -> None:
-    """Update optimizer param groups with the provided lr."""
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-
-initial_lr = get_lr_for_epoch(0)
-optimizer = optim.Adam(model.parameters(), lr=initial_lr)
 
 # 记录训练开始时间
 train_start_time = datetime.now()
@@ -189,14 +177,18 @@ for epoch in range(num_epochs):
     print(f"Epoch [{epoch+1}/{num_epochs}]")
     print(f"{'='*50}")
 
-    current_lr = get_lr_for_epoch(epoch)
-    set_optimizer_lr(optimizer, current_lr)
+    # 获取当前学习率用于打印
+    current_lr = optimizer.param_groups[0]['lr']
     print(f"当前学习率: {current_lr}")
     
     train_loss, train_acc = train_one_epoch(model=model, train_loader=train_loader, 
                                 criterion=criterion, optimizer = optimizer, device=device)
     val_loss, val_acc = validate(model=model, val_loader=val_loader, 
                             criterion=criterion, device=device)
+    
+    # 在每个epoch结束后更新学习率
+    scheduler.step()
+    
     print(f"\n训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
     print(f"验证 - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
 

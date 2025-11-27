@@ -51,22 +51,22 @@ data:
 
 model:
   # 模型类型，指定要使用的模型
-  type: 'ResNet'
+  type: 'DRSN-CW'
   # 分类的类别总数，必须与 file_names 的数量一致
   num_classes: 10
 
 train:
   # 训练的总轮次 (epochs)
-  num_epochs: 50
+  num_epochs: 100
   # 每个批次的大小 (batch_size)
   batch_size: 32
   # 优化器的学习率
-  learning_rate: 0.001
+  learning_rate: 0.1
   # 保存模型权重和结果的目录
-  checkpoint_dir: 'checkpoints/ResNet_null'
+  checkpoint_dir: 'checkpoints/DRSN_CW_-3dB'
   # 实验说明和笔记（可选，手动填写）
-  notes: 'ResNet,不加高斯噪声'
+  notes: 'DRSN-CW,加上-3dB高斯噪声'
   # 数据增强：为训练集添加高斯噪声以达到指定信噪比(SNR) in dB。
   # 如果该项不存在或为null，则不添加噪声。
   # 示例值: 10, 0, -4
-  snr_db: null
+  snr_db: -3
