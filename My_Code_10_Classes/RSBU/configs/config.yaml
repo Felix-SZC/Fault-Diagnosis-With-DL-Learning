@@ -63,10 +63,10 @@ train:
   # 优化器的学习率
   learning_rate: 0.1
   # 保存模型权重和结果的目录
-  checkpoint_dir: 'checkpoints/DRSN_CW_-3dB'
+  checkpoint_dir: 'checkpoints/DRSN_CW/DRSN_CW_2dB'
   # 实验说明和笔记（可选，手动填写）
-  notes: 'DRSN-CW,加上-3dB高斯噪声'
+  notes: 'DRSN-CW,加上2dB高斯噪声'
   # 数据增强：为训练集添加高斯噪声以达到指定信噪比(SNR) in dB。
   # 如果该项不存在或为null，则不添加噪声。
   # 示例值: 10, 0, -4
-  snr_db: -3
+  snr_db: 2
