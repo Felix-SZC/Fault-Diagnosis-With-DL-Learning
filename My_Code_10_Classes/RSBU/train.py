@@ -26,7 +26,6 @@ val_dir = os.path.join(raw_signal_output_dir, 'val')
 
 batch_size = train_config['batch_size']
 num_epochs = train_config['num_epochs']
-learning_rate = train_config['learning_rate']
 checkpoint_dir = train_config['checkpoint_dir']
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -55,7 +54,25 @@ model = get_model(model_config).to(device)
 model_type = model_config.get('type', 'Unknown')
 print(f'使用模型: {model_type}')
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+
+def get_lr_for_epoch(epoch: int) -> float:
+    """Return staged learning rate: [0-39]=0.1, [40-79]=0.01, [80-99]=0.001."""
+    if epoch < 20:
+        return 0.001
+    if epoch < 30:
+        return 0.005
+    return 0.0001
+
+
+def set_optimizer_lr(optimizer: optim.Optimizer, lr: float) -> None:
+    """Update optimizer param groups with the provided lr."""
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+
+initial_lr = get_lr_for_epoch(0)
+optimizer = optim.Adam(model.parameters(), lr=initial_lr)
 
 # 记录训练开始时间
 train_start_time = datetime.now()
@@ -172,6 +189,10 @@ for epoch in range(num_epochs):
     print(f"\n{'='*50}")
     print(f"Epoch [{epoch+1}/{num_epochs}]")
     print(f"{'='*50}")
+
+    current_lr = get_lr_for_epoch(epoch)
+    set_optimizer_lr(optimizer, current_lr)
+    print(f"当前学习率: {current_lr}")
     
     train_loss, train_acc = train_one_epoch(model=model, train_loader=train_loader, 
                                 criterion=criterion, optimizer = optimizer, device=device)

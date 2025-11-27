@@ -51,7 +51,7 @@ data:
 
 model:
   # 模型类型，指定要使用的模型
-  type: 'ResNet'
+  type: 'DRSN-CW'
   # 分类的类别总数，必须与 file_names 的数量一致
   num_classes: 10
 
@@ -63,9 +63,9 @@ train:
   # 优化器的学习率
   learning_rate: 0.001
   # 保存模型权重和结果的目录
-  checkpoint_dir: 'checkpoints/run3'
+  checkpoint_dir: 'checkpoints/DRSN_CW3'
   # 实验说明和笔记（可选，手动填写）
-  notes: 'ResNet,加上0.15高斯噪声'
+  notes: 'DRSN-CW,加上0.15高斯噪声'
   # 数据增强：是否在训练时添加高斯噪声（仅训练集，验证集和测试集不加）
   add_noise: true
   # 高斯噪声的标准差（可根据需要调整，建议范围：0.01-0.2）
