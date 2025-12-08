@@ -48,8 +48,10 @@ class RawSignalDataset(Dataset):
     可选参数：
     - snr_db: 信噪比 (dB)。如果提供，则会为每个样本添加高斯噪声以达到此信噪比。
       如果为 None，则不添加噪声。(默认: None)
+    - filter_classes: 一个包含类标签的列表。如果提供，数据集将只包含这些类别的样本，
+      并且会自动将标签重新映射到从0开始的连续整数，以便与模型输出索引匹配。(默认: None)
     """
-    def __init__(self, split_dir: str, snr_db: float = None):
+    def __init__(self, split_dir: str, snr_db: float = None, filter_classes: list = None):
         index_path = os.path.join(split_dir, 'index.csv')
         if not os.path.exists(index_path):
             # 兼容处理：如果没有 index.csv，可能是旧的目录结构或者数据未生成
@@ -59,6 +61,21 @@ class RawSignalDataset(Dataset):
         if 'file' not in self.index_df.columns or 'label' not in self.index_df.columns:
             raise ValueError('index.csv 需包含列: file,label')
         self.snr_db = snr_db
+        self.label_map = None
+
+        if filter_classes is not None:
+            split_name = os.path.basename(split_dir)
+            print(f"[{split_name}] 正在筛选数据集，类别: {filter_classes}")
+            self.index_df = self.index_df[self.index_df['label'].isin(filter_classes)]
+            
+            # 自动重映射标签到从0开始的连续整数
+            unique_labels = sorted(self.index_df['label'].unique())
+            self.label_map = {original_label: new_label for new_label, original_label in enumerate(unique_labels)}
+            self.index_df['label'] = self.index_df['label'].map(self.label_map)
+            print(f"[{split_name}] 原始标签映射到新标签: {self.label_map}")
+            
+        # 重置索引
+        self.index_df = self.index_df.reset_index(drop=True)
 
     def __len__(self):
         return len(self.index_df)

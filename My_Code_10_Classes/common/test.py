@@ -82,7 +82,7 @@ def main():
         print(f"错误: 未找到模型文件 {model_path}")
         return
         
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
     print(f"已加载模型: {model_path}")
 

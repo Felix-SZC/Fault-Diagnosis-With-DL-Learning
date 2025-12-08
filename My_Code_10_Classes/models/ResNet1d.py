@@ -62,7 +62,7 @@ class ResNet(nn.Module):
         # FC
         self.fc = nn.Linear(16, num_classes)
         
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.conv1(x)
         x = self.rbu1(x)
         x = self.rbu2(x)
@@ -73,10 +73,13 @@ class ResNet(nn.Module):
         x = self.bn(x)
         x = self.relu(x)
         x = self.gap(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
+        features = torch.flatten(x, 1)
+        logits = self.fc(features)
         
-        return x
+        if return_features:
+            return logits, features
+        else:
+            return logits
 
 def ResNet_test(num_classes=10):
     return ResNet(num_classes=num_classes)
