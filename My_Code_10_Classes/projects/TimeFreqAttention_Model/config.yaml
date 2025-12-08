@@ -1,0 +1,72 @@
+# 基于时频融合和注意力机制的故障诊断模型配置文件
+
+# 数据配置
+data:
+  type: wpt
+  # 原始 .mat 数据文件所在的目录路径
+  data_path: 'data/matfiles'
+  
+  file_names:
+    - 'normal_0.mat'     # 标签: 0
+    - 'IR007_0.mat'      # 标签: 1
+    - 'B007_0.mat'       # 标签: 2
+    - 'OR007@6_0.mat'    # 标签: 3
+    - 'IR014_0.mat'      # 标签: 4
+    - 'B014_0.mat'       # 标签: 5
+    - 'OR014@6_0.mat'    # 标签: 6
+    - 'IR021_0.mat'      # 标签: 7
+    - 'B021_0.mat'       # 标签: 8
+    - 'OR021@6_0.mat'    # 标签: 9
+  
+  truncated_value: 102912
+  time_steps: 1024
+  overlap_ratio: 0.5
+  
+  csv_file_path: 'data/samples_data.csv'
+  split_ratios: [0.7, 0.2, 0.1]
+  
+  # 是否使用CSV文件
+  use_csv: true
+
+  # 预计算 WPT 阵列是否直接读取
+  use_wpt_precomputed: false
+  # 预计算 WPT 阵列输出目录
+  wpt_output_dir: 'data/WPTarrays'
+
+# 小波包分解配置
+wavelet:
+  wavelet_type: 'db4'
+  max_level: 6
+
+# 模型配置
+model:
+  type: TimeFreqAttention
+  num_classes: 10
+  cnn_out_channels: 64
+  gru_hidden_dim: 128
+  dropout_rate: 0.3
+
+# 训练配置
+train:
+  num_epochs: 50
+  batch_size: 32
+  learning_rate: 0.0005
+  
+  # 优化器配置
+  optimizer: 'Adam'
+  
+  checkpoint_dir: 'checkpoints/TimeFreqAttention_Model/6.attention(2residuals)'
+  
+  # 实验说明和笔记（可选，手动填写）
+  notes: 'TimeFreqAttention baseline'
+  
+  # 学习率调度器配置
+  scheduler:
+    use_scheduler: true
+    scheduler_type: 'StepLR'
+    step_size: 10
+    gamma: 0.5
+
+# 测试配置
+test:
+  batch_size: 32
