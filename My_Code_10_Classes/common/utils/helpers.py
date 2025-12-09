@@ -81,6 +81,13 @@ def save_experiment_info(config, checkpoint_dir, model=None, train_dataset=None,
     data_config = config.get('data', {})
     dataset_info['data_path'] = data_config.get('data_path', 'Unknown')
     dataset_info['split_ratios'] = data_config.get('split_ratios', 'Unknown')
+    
+    # 添加 Open-set 配置信息（如果存在）
+    openset_config = data_config.get('openset', {})
+    if openset_config:
+        dataset_info['known_classes'] = openset_config.get('known_classes', [])
+        dataset_info['unknown_classes'] = openset_config.get('unknown_classes', [])
+    
     experiment_info['data'] = dataset_info
     
     # 训练信息
@@ -89,11 +96,15 @@ def save_experiment_info(config, checkpoint_dir, model=None, train_dataset=None,
         'num_epochs': train_config.get('num_epochs', 'Unknown'),
         'batch_size': train_config.get('batch_size', 'Unknown'),
         'learning_rate': train_config.get('learning_rate', 'Unknown'),
-        'optimizer': 'Adam',  # 默认记录为Adam，如果不同需要传递更多信息
+        'optimizer': train_config.get('optimizer', 'Adam'),  # 从配置文件读取优化器类型
         'criterion': 'CrossEntropyLoss',
         'checkpoint_dir': train_config.get('checkpoint_dir', 'Unknown'),
         'notes': train_config.get('notes', '')
     }
+    # 如果是 SGD，添加 momentum 和 weight_decay 信息
+    if training_info['optimizer'] == 'SGD':
+        training_info['momentum'] = train_config.get('momentum', 0.9)
+        training_info['weight_decay'] = train_config.get('weight_decay', 1e-4)
     experiment_info['training'] = training_info
     
     # 训练结果
@@ -159,6 +170,15 @@ def save_experiment_info(config, checkpoint_dir, model=None, train_dataset=None,
                 ratios = data_info['split_ratios']
                 f.write(f"数据集划分比例: {ratios}\n")
             f.write(f"数据配置路径: {data_info.get('data_path', 'Unknown')}\n")
+            
+            # 添加 Open-set 类别信息
+            if 'known_classes' in data_info:
+                known_classes = data_info['known_classes']
+                f.write(f"已知类别: {known_classes}\n")
+            if 'unknown_classes' in data_info:
+                unknown_classes = data_info['unknown_classes']
+                f.write(f"未知类别: {unknown_classes}\n")
+            
             f.write("\n")
         
         # 训练配置
@@ -169,7 +189,14 @@ def save_experiment_info(config, checkpoint_dir, model=None, train_dataset=None,
             f.write(f"训练轮数: {train_info.get('num_epochs', 'Unknown')}\n")
             f.write(f"批次大小: {train_info.get('batch_size', 'Unknown')}\n")
             f.write(f"学习率: {train_info.get('learning_rate', 'Unknown')}\n")
-            f.write(f"优化器: {train_info.get('optimizer', 'Unknown')}\n")
+            optimizer_name = train_info.get('optimizer', 'Unknown')
+            f.write(f"优化器: {optimizer_name}\n")
+            # 如果是 SGD，显示 momentum 和 weight_decay
+            if optimizer_name == 'SGD':
+                momentum = train_info.get('momentum', 0.9)
+                weight_decay = train_info.get('weight_decay', 1e-4)
+                f.write(f"  - Momentum: {momentum}\n")
+                f.write(f"  - Weight Decay: {weight_decay}\n")
             f.write(f"损失函数: {train_info.get('criterion', 'Unknown')}\n")
             f.write(f"保存目录: {train_info.get('checkpoint_dir', 'Unknown')}\n")
             notes = train_info.get('notes', '').strip()

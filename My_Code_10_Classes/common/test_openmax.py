@@ -48,12 +48,23 @@ def main():
         weibull_models = pickle.load(f)
     print("MAVs 和 Weibull 模型加载成功。")
 
-    # 4. 准备测试数据（不过滤任何类，保持原始标签）
+    # 4. 准备测试数据
     base_dir = data_config.get('raw_signal_output_dir')
     split_dir = os.path.join(base_dir, 'test')
+    known_classes = data_config['openset']['known_classes']
+    
+    # 创建一个临时数据集以获取训练时的标签映射
+    # 这个映射与训练时使用的映射完全一致（基于 sorted(unique_labels)）
+    temp_dataset = RawSignalDataset(split_dir=split_dir, filter_classes=known_classes)
+    train_label_map = temp_dataset.label_map if hasattr(temp_dataset, 'label_map') and temp_dataset.label_map else None
+    
+    # 使用全部数据（包括已知和未知类）进行测试，保持原始标签
     test_dataset = RawSignalDataset(split_dir=split_dir, filter_classes=None)
     test_loader = DataLoader(test_dataset, batch_size=train_config['batch_size'], shuffle=False)
     print(f"测试集大小: {len(test_dataset)}")
+    
+    if train_label_map:
+        print(f"训练时的标签映射: {train_label_map}")
 
     # 5. 执行评估
     all_labels = []
@@ -65,10 +76,54 @@ def main():
             inputs = inputs.to(device)
             logits, features = model(inputs, return_features=True)
             
-            # OpenMax 计算需要在 CPU 上进行
-            openmax_probs = compute_openmax_prob(logits.cpu(), features.cpu(), mavs.cpu(), weibull_models)
+            # OpenMax 计算需要在 CPU 上进行，并且是针对单个样本的
+            logits_np = logits.cpu().numpy()
+            features_np = features.cpu().numpy()
+            mavs_np = mavs.cpu().numpy()
             
-            preds = torch.argmax(openmax_probs, dim=1)
+            batch_probs = []
+            for i in range(logits_np.shape[0]): # 遍历批次中的每个样本
+                # 关键修复：只取已知类对应的 Logits
+                # 假设 mavs 是按照 known_classes 的顺序存储的（由 train_openmax.py 保证）
+                # 且模型的 logits 输出索引对应原始类别 ID
+                # known_classes: [1, 2, ..., 9]
+                # mavs[0] 对应 class 1, mavs[1] 对应 class 2 ...
+                
+                current_logits = logits_np[i]
+                
+                # 模型输出已经是针对已知类的 (0..num_classes-1)，对应 known_classes 中的顺序
+                known_logits = current_logits
+                
+                prob = compute_openmax_prob(
+                    known_logits, features_np[i], mavs_np, weibull_models
+                )
+                
+                # prob 的长度是 len(known_classes) + 1
+                # 我们需要将其映射回原始的类别空间 + 未知类
+                # 这里为了简化评估，我们保持 OpenMax 的输出格式 (K+1)，
+                # 但需要注意，现在的索引 0 对应 known_classes[0]，索引 1 对应 known_classes[1]...
+                # 最后一个索引对应 Unknown。
+                # 下面的 preds 计算逻辑需要适配这一点。
+                batch_probs.append(prob)
+            
+            openmax_probs = torch.from_numpy(np.array(batch_probs))
+            
+            # 预测类别索引 (0 到 K)
+            # 0 到 K-1 对应 known_classes 中的类别
+            # K 对应 Unknown
+            preds_local_idx = torch.argmax(openmax_probs, dim=1)
+            
+            # 将局部索引映射回原始类别索引
+            # 0..K-1 -> known_classes[idx]
+            # K -> -1 (表示 Unknown)
+            preds = []
+            for p in preds_local_idx:
+                if p < len(known_classes):
+                    preds.append(known_classes[p])
+                else:
+                    preds.append(-1) # 使用 -1 明确标记为 Unknown
+            
+            preds = torch.tensor(preds)
             
             all_labels.extend(labels.numpy())
             all_preds.extend(preds.numpy())
@@ -79,60 +134,109 @@ def main():
     all_preds = np.array(all_preds)
     
     # 6. 计算指标
-    known_classes = data_config['openset']['known_classes']
-    unknown_classes = data_config['openset']['unknown_classes']
+    unknown_classes = data_config['openset'].get('unknown_classes', [])
     num_known_classes = len(known_classes)
+    
+    # 检查测试集中是否有未知类
+    has_unknown_samples = len(unknown_classes) > 0 and np.any(np.isin(all_labels, unknown_classes))
 
-    # 分离已知和未知样本
+    # 分离已知和未知样本（使用原始标签）
     known_mask = np.isin(all_labels, known_classes)
-    unknown_mask = np.isin(all_labels, unknown_classes)
-
+    
     # 指标1: 已知类的分类准确率 (Closed-set Accuracy)
     # 需要将原始标签映射到训练时的标签
-    label_map = {orig_label: new_label for new_label, orig_label in enumerate(known_classes)}
-    mapped_known_labels = np.array([label_map[l] for l in all_labels[known_mask]])
-    known_preds = all_preds[known_mask]
+    # 训练时 RawSignalDataset 使用 sorted(unique_labels) 创建映射
+    if train_label_map is not None:
+        # 使用训练时的实际映射（这是最准确的方式）
+        label_map = train_label_map
+        print(f"使用训练时的标签映射: {label_map}")
+    else:
+        # 回退方案：使用 sorted(known_classes) 创建映射（与训练时 RawSignalDataset 的逻辑一致）
+        sorted_known = sorted(known_classes)
+        label_map = {orig_label: new_label for new_label, orig_label in enumerate(sorted_known)}
+        print(f"使用回退标签映射: {label_map}")
     
-    accuracy = accuracy_score(mapped_known_labels, known_preds)
+    # 将已知类的原始标签映射到训练时的标签
+    mapped_known_labels = np.array([label_map.get(l, -1) for l in all_labels[known_mask]])
+    
+    # 获取已知类样本的预测值
+    known_preds_orig = all_preds[known_mask] # 这里的预测值是原始 ID (1..9) 或 -1 (Unknown)
+    
+    # 如果预测为 -1 (Unknown)，在闭集准确率计算中应视为错误
+    # 如果预测为 1..9，需要将其映射回 0..8 (训练标签) 才能和 mapped_known_labels 比较
+    # 注意：闭集准确率通常只看已知类是否分对，如果分到未知类也算错
+    
+    known_preds_mapped = []
+    for p in known_preds_orig:
+        if p == -1:
+            known_preds_mapped.append(-1) # 错误
+        else:
+            # 查找预测的原始 ID 在 label_map 中的对应值
+            if p in label_map:
+                known_preds_mapped.append(label_map[p])
+            else:
+                known_preds_mapped.append(-2) # 预测为了其他已知类？或者异常
+                
+    known_preds_mapped = np.array(known_preds_mapped)
+    
+    # 过滤掉映射失败的样本（理论上不应该发生）
+    valid_mask = mapped_known_labels >= 0
+    if not np.all(valid_mask):
+        print(f"警告: {np.sum(~valid_mask)} 个已知类样本无法映射到训练标签")
+    mapped_known_labels = mapped_known_labels[valid_mask]
+    known_preds_mapped = known_preds_mapped[valid_mask]
+    
+    if len(mapped_known_labels) == 0:
+        print("错误: 没有有效的已知类样本用于评估")
+        return
+    
+    accuracy = accuracy_score(mapped_known_labels, known_preds_mapped)
     print(f"\n--- 评估结果 ---")
     print(f"已知类准确率 (Accuracy): {accuracy * 100:.2f}%")
 
-    # 指标2: F1-Score 用于检测未知类
-    # 将预测为 "未知" (类别索引为 num_known_classes) 的作为正例
-    pred_is_unknown = (all_preds == num_known_classes).astype(int)
-    true_is_unknown = unknown_mask.astype(int)
-    
-    f1 = f1_score(true_is_unknown, pred_is_unknown)
-    print(f"F1-Score (检测未知类): {f1:.4f}")
+    # 只有在存在未知类时才计算开放集指标
+    if has_unknown_samples:
+        unknown_mask = np.isin(all_labels, unknown_classes)
+        # 指标2: F1-Score 用于检测未知类
+        # 将预测为 "未知" (类别 ID 为 -1) 的作为正例
+        pred_is_unknown = (all_preds == -1).astype(int)
+        true_is_unknown = unknown_mask.astype(int)
+        
+        f1 = f1_score(true_is_unknown, pred_is_unknown)
+        print(f"F1-Score (检测未知类): {f1:.4f}")
 
-    # 指标3: AUROC 用于区分已知/未知
-    # 使用 "未知" 类的概率作为分数
-    unknown_prob_scores = all_openmax_probs[:, num_known_classes]
-    auroc = roc_auc_score(true_is_unknown, unknown_prob_scores)
-    print(f"AUROC (区分已知/未知): {auroc:.4f}")
-    
-    # 绘制 ROC 曲线
-    fpr, tpr, _ = roc_curve(true_is_unknown, unknown_prob_scores)
-    plt.figure()
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {auroc:.2f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve for Unknown Detection')
-    plt.legend(loc="lower right")
-    
-    # 保存ROC曲线图
-    roc_curve_path = os.path.join(checkpoint_dir, 'test', 'roc_curve.png')
-    os.makedirs(os.path.dirname(roc_curve_path), exist_ok=True)
-    plt.savefig(roc_curve_path)
-    print(f"ROC 曲线已保存至: {roc_curve_path}")
-    plt.close()
-    
+        # 指标3: AUROC 用于区分已知/未知
+        # 使用 "未知" 类的概率作为分数 (openmax_probs 的最后一列)
+        unknown_prob_scores = all_openmax_probs[:, num_known_classes]
+        auroc = roc_auc_score(true_is_unknown, unknown_prob_scores)
+        print(f"AUROC (区分已知/未知): {auroc:.4f}")
+        
+        # 绘制 ROC 曲线
+        fpr, tpr, _ = roc_curve(true_is_unknown, unknown_prob_scores)
+        plt.figure()
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {auroc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('ROC Curve for Unknown Detection')
+        plt.legend(loc="lower right")
+        
+        # 保存ROC曲线图
+        roc_curve_path = os.path.join(checkpoint_dir, 'test', 'roc_curve.png')
+        os.makedirs(os.path.dirname(roc_curve_path), exist_ok=True)
+        plt.savefig(roc_curve_path)
+        print(f"ROC 曲线已保存至: {roc_curve_path}")
+        plt.close()
+    else:
+        print("测试集中未发现未知类样本，跳过开放集指标评估。")
+
     # 绘制混淆矩阵
-    # 准备标签：已知类使用原始标签，未知类统一标记为 "Unknown"
-    # 预测：已知类使用预测的类别索引，未知类标记为 num_known_classes
+    # 准备标签：已知类使用原始标签索引，未知类统一标记为 num_known_classes
+    # 预测：需要将 all_preds (包含原始 ID 和 -1) 映射到混淆矩阵的索引
+    # CM 索引：0..K-1 对应 known_classes, K 对应 Unknown
+    
     cm_labels = []
     cm_preds = []
     
@@ -154,8 +258,17 @@ def main():
             # 未知类的真实标签：标记为 "Unknown" (索引为 num_known_classes)
             cm_labels.append(num_known_classes)
         
-        # 预测标签直接使用（已经是 0 到 num_known_classes 的索引）
-        cm_preds.append(pred_label)
+        # 处理预测标签
+        if pred_label == -1:
+            # 预测为未知
+            cm_preds.append(num_known_classes)
+        elif pred_label in known_classes:
+            # 预测为已知类，找到其在 known_classes 中的索引
+            pred_idx = known_classes.index(pred_label)
+            cm_preds.append(pred_idx)
+        else:
+            # 异常情况 (例如预测出了不在 known_classes 中的类，理论上不应发生)
+            cm_preds.append(num_known_classes) # 归为 Unknown 或其他
     
     cm_labels = np.array(cm_labels)
     cm_preds = np.array(cm_preds)
