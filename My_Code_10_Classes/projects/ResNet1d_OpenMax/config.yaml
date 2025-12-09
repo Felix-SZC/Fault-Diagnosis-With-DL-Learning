@@ -36,9 +36,9 @@ data:
   # --- Open-set 配置 ---
   openset:
     # 训练时视为已知类的标签列表
-    known_classes: [1,2,3,4,5,6,7,8,9]
+    known_classes: [0,1,2,4,5,7,8]
     # 测试时视为未知类的标签列表
-    unknown_classes: [0]
+    unknown_classes: [3,6,9]
 
 # --------------------------------------------------
 # 模型和训练配置文件
@@ -47,15 +47,15 @@ data:
 model:
   # 模型类型: ResNet1d
   type: 'ResNet1d'
-  num_classes: 9
+  num_classes: 7
 
 train:
   num_epochs: 20
   
   batch_size: 32
   learning_rate: 0.01
-  checkpoint_dir: 'checkpoints/ResNet1d_OpenMax/run3'
-  notes: 'ResNet1d OpenMax 类别0为未知类'
+  checkpoint_dir: 'checkpoints/ResNet1d_OpenMax/run2'
+  notes: 'ResNet1d + 最经典 OpenMax 类别3,6,9为未知类'
   
   # 设备配置（可选）：'cuda' 或 'cpu'，如果不指定则自动检测
   device: 'cuda'  # 取消注释此行以强制使用 GPU
@@ -68,8 +68,8 @@ train:
   
   # 学习率调度器配置
   scheduler:
-    use_scheduler: true
+    use_scheduler: True
     scheduler_type: 'StepLR'
-    step_size: 2
+    step_size: 4
     gamma: 0.8
 

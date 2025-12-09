@@ -94,8 +94,10 @@ def main():
                 # 模型输出已经是针对已知类的 (0..num_classes-1)，对应 known_classes 中的顺序
                 known_logits = current_logits
                 
+                # Strict Implementation:
+                # 第二个参数 input_vector 必须是 logits (与 MAV 所在空间一致)
                 prob = compute_openmax_prob(
-                    known_logits, features_np[i], mavs_np, weibull_models
+                    known_logits, known_logits, mavs_np, weibull_models
                 )
                 
                 # prob 的长度是 len(known_classes) + 1
@@ -194,6 +196,14 @@ def main():
     print(f"\n--- 评估结果 ---")
     print(f"已知类准确率 (Accuracy): {accuracy * 100:.2f}%")
 
+    # 存储评估结果，用于写入文件
+    test_results = {
+        'accuracy': accuracy * 100,
+        'f1_score': None,
+        'auroc': None,
+        'has_unknown': has_unknown_samples
+    }
+
     # 只有在存在未知类时才计算开放集指标
     if has_unknown_samples:
         unknown_mask = np.isin(all_labels, unknown_classes)
@@ -204,12 +214,14 @@ def main():
         
         f1 = f1_score(true_is_unknown, pred_is_unknown)
         print(f"F1-Score (检测未知类): {f1:.4f}")
+        test_results['f1_score'] = f1
 
         # 指标3: AUROC 用于区分已知/未知
         # 使用 "未知" 类的概率作为分数 (openmax_probs 的最后一列)
         unknown_prob_scores = all_openmax_probs[:, num_known_classes]
         auroc = roc_auc_score(true_is_unknown, unknown_prob_scores)
         print(f"AUROC (区分已知/未知): {auroc:.4f}")
+        test_results['auroc'] = auroc
         
         # 绘制 ROC 曲线
         fpr, tpr, _ = roc_curve(true_is_unknown, unknown_prob_scores)
@@ -290,6 +302,53 @@ def main():
     plt.savefig(cm_path, dpi=150)
     print(f"混淆矩阵已保存至: {cm_path}")
     plt.close()
+
+    # 7. 将评估结果追加到 experiment_info.txt
+    experiment_info_path = os.path.join(checkpoint_dir, 'experiment_info.txt')
+    if os.path.exists(experiment_info_path):
+        # 读取现有内容
+        with open(experiment_info_path, 'r', encoding='utf-8') as f:
+            existing_content = f.read()
+        
+        # 检查是否已经有评估结果部分，如果有则删除旧的部分
+        if '【测试评估结果】' in existing_content:
+            # 找到评估结果部分的位置并删除
+            lines = existing_content.split('\n')
+            new_lines = []
+            skip_section = False
+            for line in lines:
+                if '【测试评估结果】' in line:
+                    skip_section = True
+                elif skip_section and line.startswith('=') and len(line) >= 80:
+                    # 遇到下一个分隔符，停止跳过
+                    skip_section = False
+                    new_lines.append(line)
+                elif not skip_section:
+                    new_lines.append(line)
+            existing_content = '\n'.join(new_lines)
+        
+        # 追加评估结果
+        with open(experiment_info_path, 'w', encoding='utf-8') as f:
+            f.write(existing_content.rstrip() + '\n\n')
+            f.write("【测试评估结果】\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"测试集大小: {len(test_dataset):,}\n")
+            f.write(f"已知类准确率 (Closed-set Accuracy): {test_results['accuracy']:.2f}%\n")
+            
+            if test_results['has_unknown']:
+                if test_results['f1_score'] is not None:
+                    f.write(f"F1-Score (检测未知类): {test_results['f1_score']:.4f}\n")
+                if test_results['auroc'] is not None:
+                    f.write(f"AUROC (区分已知/未知): {test_results['auroc']:.4f}\n")
+            else:
+                f.write("测试集中未发现未知类样本，未计算开放集指标。\n")
+            
+            f.write("\n")
+            f.write("=" * 80 + "\n")
+        
+        print(f"\n评估结果已追加至: {experiment_info_path}")
+    else:
+        print(f"警告: 未找到实验信息文件 {experiment_info_path}，跳过结果写入。")
 
 if __name__ == '__main__':
     main()
