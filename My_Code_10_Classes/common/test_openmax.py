@@ -15,9 +15,30 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 from common.utils.helpers import load_config
-from common.utils.data_loader import RawSignalDataset
+from common.utils.data_loader import RawSignalDataset, NpyIndexDataset
 from models import get_model
 from common.openmax import compute_openmax_prob
+
+def get_dataset(data_config, split='test', filter_classes=None):
+    """根据配置动态加载数据集 (test_openmax 版本)"""
+    data_type = data_config.get('type')
+    if data_type is None:
+        raise ValueError("配置文件中必须指定 data.type")
+
+    if data_type == 'raw_signal':
+        base_dir = data_config.get('raw_signal_output_dir')
+        if base_dir is None:
+            raise ValueError("配置文件中缺少 'raw_signal_output_dir'")
+        split_dir = os.path.join(base_dir, split)
+        return RawSignalDataset(split_dir=split_dir, filter_classes=filter_classes)
+    elif data_type == 'wpt':
+        base_dir = data_config.get('wpt_output_dir')
+        if base_dir is None:
+            raise ValueError("配置文件中缺少 'wpt_output_dir'")
+        split_dir = os.path.join(base_dir, split)
+        return NpyIndexDataset(split_dir=split_dir, filter_classes=filter_classes)
+    else:
+        raise ValueError(f"test_openmax.py 目前仅支持 'raw_signal' 和 'wpt' 数据类型，当前为: {data_type}")
 
 def main():
     parser = argparse.ArgumentParser(description='OpenMax Evaluation Script')
@@ -49,17 +70,14 @@ def main():
     print("MAVs 和 Weibull 模型加载成功。")
 
     # 4. 准备测试数据
-    base_dir = data_config.get('raw_signal_output_dir')
-    split_dir = os.path.join(base_dir, 'test')
     known_classes = data_config['openset']['known_classes']
     
     # 创建一个临时数据集以获取训练时的标签映射
-    # 这个映射与训练时使用的映射完全一致（基于 sorted(unique_labels)）
-    temp_dataset = RawSignalDataset(split_dir=split_dir, filter_classes=known_classes)
+    temp_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
     train_label_map = temp_dataset.label_map if hasattr(temp_dataset, 'label_map') and temp_dataset.label_map else None
     
     # 使用全部数据（包括已知和未知类）进行测试，保持原始标签
-    test_dataset = RawSignalDataset(split_dir=split_dir, filter_classes=None)
+    test_dataset = get_dataset(data_config, split='test', filter_classes=None)
     test_loader = DataLoader(test_dataset, batch_size=train_config['batch_size'], shuffle=False)
     print(f"测试集大小: {len(test_dataset)}")
     
@@ -90,14 +108,15 @@ def main():
                 # mavs[0] 对应 class 1, mavs[1] 对应 class 2 ...
                 
                 current_logits = logits_np[i]
+                current_features = features_np[i]
                 
                 # 模型输出已经是针对已知类的 (0..num_classes-1)，对应 known_classes 中的顺序
                 known_logits = current_logits
                 
-                # Strict Implementation:
-                # 第二个参数 input_vector 必须是 logits (与 MAV 所在空间一致)
+                # 使用 Deep Features 进行 OpenMax 计算
+                # 第二个参数必须是 features (与 MAV 所在空间一致，即 Deep Features)
                 prob = compute_openmax_prob(
-                    known_logits, known_logits, mavs_np, weibull_models
+                    known_logits, current_features, mavs_np, weibull_models
                 )
                 
                 # prob 的长度是 len(known_classes) + 1

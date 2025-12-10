@@ -1,0 +1,90 @@
+# --------------------------------------------------
+# 数据预处理配置文件 (config.yaml)
+# --------------------------------------------------
+
+data:
+  type: raw_signal
+  # 原始 .mat 数据文件所在的目录路径
+  data_path: 'data/matfiles'
+  
+  file_names:
+    - 'normal_0.mat'     # 标签: 0
+    - 'IR007_0.mat'      # 标签: 1
+    - 'B007_0.mat'       # 标签: 2
+    - 'OR007@6_0.mat'    # 标签: 3
+    - 'IR014_0.mat'      # 标签: 4
+    - 'B014_0.mat'       # 标签: 5
+    - 'OR014@6_0.mat'    # 标签: 6
+    - 'IR021_0.mat'      # 标签: 7
+    - 'B021_0.mat'       # 标签: 8
+    - 'OR021@6_0.mat'    # 标签: 9
+  
+  truncated_value: 102912
+  time_steps: 1024
+  overlap_ratio: 0.5
+  
+  csv_output_path: 'data/samples_data.csv'
+  
+  # --- make_raw_signal_dataset.py 配置 ---
+  
+  csv_file_path: 'data/samples_data.csv'
+  split_ratios: [0.7, 0.2, 0.1]
+  
+  # 预处理原始信号输出目录
+  raw_signal_output_dir: 'data/RawSignals'
+
+  # --- 标签映射说明 ---
+  # 原始信号数据集中的标签对应关系（基于原始 .mat 文件顺序）：
+  #   标签 0: normal_0.mat          - 正常状态
+  #   标签 1: IR007_0.mat          - 内圈故障 (007尺寸)
+  #   标签 2: B007_0.mat           - 滚珠故障 (007尺寸)
+  #   标签 3: OR007@6_0.mat        - 外圈故障 (007尺寸@6点钟位置)
+  #   标签 4: IR014_0.mat          - 内圈故障 (014尺寸)
+  #   标签 5: B014_0.mat           - 滚珠故障 (014尺寸)
+  #   标签 6: OR014@6_0.mat        - 外圈故障 (014尺寸@6点钟位置)
+  #   标签 7: IR021_0.mat          - 内圈故障 (021尺寸)
+  #   标签 8: B021_0.mat           - 滚珠故障 (021尺寸)
+  #   标签 9: OR021@6_0.mat        - 外圈故障 (021尺寸@6点钟位置)
+  
+  # --- Open-set 配置 ---
+  openset:
+    # 训练时视为已知类的标签列表
+    # 包含: 正常(0) + 007/014尺寸的内圈/滚珠故障(1,2,4,5) + 021尺寸的内圈/滚珠故障(7,8)
+    known_classes: [0, 1, 2, 4, 5, 7, 8]
+    # 测试时视为未知类的标签列表
+    # 包含: 所有外圈故障 (007/014/021尺寸)
+    unknown_classes: [3, 6, 9]
+
+# --------------------------------------------------
+# 模型和训练配置文件
+# --------------------------------------------------
+
+model:
+  # 模型类型: ResNet18_1d (18层一维 ResNet)
+  type: 'ResNet18_1d'
+  num_classes: 7
+
+train:
+  num_epochs: 40
+  
+  batch_size: 32
+  learning_rate: 0.01
+  checkpoint_dir: 'checkpoints/ResNet18_1d_OpenMax/run1'
+  notes: 'ResNet18_1d + Deep Features OpenMax (未知类: 3, 6, 9)，使用原始信号数据'
+  
+  # 设备配置（可选）：'cuda' 或 'cpu'，如果不指定则自动检测
+  device: 'cuda'
+  
+  # 数据增强配置（可选）
+  # snr_db: null  # 不添加噪声（默认）。如需添加噪声，设置为数值，如 10 表示 10dB 信噪比
+  
+  # 优化器配置
+  optimizer: 'Adam'
+  
+  # 学习率调度器配置
+  scheduler:
+    use_scheduler: True
+    scheduler_type: 'StepLR'
+    step_size: 4
+    gamma: 0.8
+

@@ -116,11 +116,11 @@ class NpyIndexDataset(Dataset):
     - split_dir 下应包含 index.csv（两列：file,label）
     - 每一行 file 指向同目录下的一个 .npy 文件
     - .npy 内容为 (bands, time) 的浮点矩阵（例如 (16, 1024)）
-    - __getitem__ 返回 (Tensor[bands, time], int_label)
+    - __getitem__ 返回 (Tensor[1, bands, time], int_label) 以兼容2D卷积
     
     适用于 TimeFreqAttention_Model 等项目。
     """
-    def __init__(self, split_dir: str):
+    def __init__(self, split_dir: str, filter_classes: list = None):
         index_path = os.path.join(split_dir, 'index.csv')
         if not os.path.exists(index_path):
             raise FileNotFoundError(f'未找到索引文件: {index_path}')
@@ -128,6 +128,19 @@ class NpyIndexDataset(Dataset):
         self.index_df = pd.read_csv(index_path)
         if 'file' not in self.index_df.columns or 'label' not in self.index_df.columns:
             raise ValueError('index.csv 需包含列: file,label')
+        
+        self.label_map = None
+        if filter_classes is not None:
+            split_name = os.path.basename(split_dir)
+            print(f"[{split_name}] 正在筛选 WPT 数据集，类别: {filter_classes}")
+            self.index_df = self.index_df[self.index_df['label'].isin(filter_classes)]
+            
+            unique_labels = sorted(self.index_df['label'].unique())
+            self.label_map = {original_label: new_label for new_label, original_label in enumerate(unique_labels)}
+            self.index_df['label'] = self.index_df['label'].map(self.label_map)
+            print(f"[{split_name}] WPT 原始标签映射到新标签: {self.label_map}")
+            
+        self.index_df = self.index_df.reset_index(drop=True)
 
     def __len__(self):
         return len(self.index_df)
@@ -138,6 +151,10 @@ class NpyIndexDataset(Dataset):
         # 加载单个样本（小波包系数矩阵）
         arr = np.load(path)               # numpy.ndarray, 形状：(bands, time)
         tensor = torch.from_numpy(arr).float()
+        
+        # 添加通道维度以兼容 2D CNN: (bands, time) -> (1, bands, time)
+        tensor = tensor.unsqueeze(0)
+        
         label = int(row['label'])
         return tensor, label
 

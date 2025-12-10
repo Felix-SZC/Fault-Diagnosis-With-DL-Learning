@@ -15,7 +15,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 from common.utils.helpers import load_config, save_experiment_info
-from common.utils.data_loader import RawSignalDataset
+from common.utils.data_loader import RawSignalDataset, NpyIndexDataset
 from common.utils.trainer import train_one_epoch, validate
 from common.openmax import compute_mavs, fit_weibull
 from models import get_model
@@ -37,8 +37,12 @@ def get_dataset(data_config, split='train'):
         base_dir = data_config.get('raw_signal_output_dir')
         split_dir = os.path.join(base_dir, split)
         return RawSignalDataset(split_dir=split_dir, filter_classes=known_classes)
+    elif data_type == 'wpt':
+        base_dir = data_config.get('wpt_output_dir')
+        split_dir = os.path.join(base_dir, split)
+        return NpyIndexDataset(split_dir=split_dir, filter_classes=known_classes)
     else:
-        raise ValueError(f"OpenMax 训练脚本目前仅支持 raw_signal 数据类型，当前类型: {data_type}")
+        raise ValueError(f"OpenMax 训练脚本目前仅支持 'raw_signal' 和 'wpt' 数据类型，当前类型: {data_type}")
 
 def main():
     parser = argparse.ArgumentParser(description='Unified Training Script')
@@ -57,11 +61,12 @@ def main():
     train_dataset = get_dataset(data_config, split='train')
     val_dataset = get_dataset(data_config, split='val')
     
-    # 设置 snr_db（噪声增强）
-    snr_db = train_config.get('snr_db', None)
-    train_dataset.snr_db = snr_db
-    if snr_db is not None:
-        print(f"训练集启用高斯噪声增强，SNR: {snr_db} dB")
+    # 设置 snr_db（噪声增强），仅对 RawSignalDataset 生效
+    if isinstance(train_dataset, RawSignalDataset):
+        snr_db = train_config.get('snr_db', None)
+        train_dataset.snr_db = snr_db
+        if snr_db is not None:
+            print(f"训练集启用高斯噪声增强，SNR: {snr_db} dB")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -271,12 +276,12 @@ def main():
     # 3. 计算 MAVs 和 Weibull 模型
     num_known_classes = len(data_config['openset']['known_classes'])
     
-    print("正在计算 MAVs...")
-    mavs, correct_logits, correct_labels = compute_mavs(model, openset_train_loader, num_known_classes, device)
+    print("正在计算 MAVs (使用 Deep Features)...")
+    mavs, all_features, correct_labels = compute_mavs(model, openset_train_loader, num_known_classes, device)
     
-    print("正在拟合 Weibull 模型...")
-    # fit_weibull 现在接受 logits 作为输入 (correct_logits)
-    weibull_models = fit_weibull(mavs, correct_logits, correct_labels)
+    print("正在拟合 Weibull 模型 (使用 Deep Features)...")
+    # fit_weibull 现在使用 features 而不是 logits
+    weibull_models = fit_weibull(mavs, all_features, correct_labels)
     
     # 4. 保存 OpenMax 所需文件
     openmax_dir = os.path.join(checkpoint_dir, 'openmax_files')

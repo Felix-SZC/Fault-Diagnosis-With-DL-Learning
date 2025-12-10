@@ -60,7 +60,7 @@ data:
 # --------------------------------------------------
 
 model:
-  type: ResNet2d
+  type: ResNet18_2d
   # 分类的类别总数
   num_classes: 10
   # 模型名称
@@ -78,7 +78,7 @@ train:
   optimizer: 'Adam'
   
   # 保存模型权重和结果的目录
-  checkpoint_dir: 'checkpoints/Handcraft_ResNet/test'
+  checkpoint_dir: 'checkpoints/ResNet18/test'
   # 实验说明和笔记（可选，手动填写）
   notes: '改完架构后，测试一下'
   
