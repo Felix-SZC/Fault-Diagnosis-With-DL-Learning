@@ -273,15 +273,23 @@ def main():
     openset_train_dataset = get_dataset(data_config, 'train')
     openset_train_loader = DataLoader(openset_train_dataset, batch_size=batch_size, shuffle=False)
 
+    openmax_source = train_config.get('openmax_source', 'features') # 默认为 features
+    print(f"OpenMax MAVs 计算源: {openmax_source}")
+
     # 3. 计算 MAVs 和 Weibull 模型
     num_known_classes = len(data_config['openset']['known_classes'])
     
-    print("正在计算 MAVs (使用 Deep Features)...")
-    mavs, all_features, correct_labels = compute_mavs(model, openset_train_loader, num_known_classes, device)
+    print(f"正在计算 MAVs (使用 {openmax_source})...")
+    mavs, all_data_for_weibull, correct_labels = compute_mavs(
+        model, 
+        openset_train_loader, 
+        num_known_classes, 
+        device,
+        source=openmax_source
+    )
     
-    print("正在拟合 Weibull 模型 (使用 Deep Features)...")
-    # fit_weibull 现在使用 features 而不是 logits
-    weibull_models = fit_weibull(mavs, all_features, correct_labels)
+    print(f"正在拟合 Weibull 模型 (使用 {openmax_source})...")
+    weibull_models = fit_weibull(mavs, all_data_for_weibull, correct_labels)
     
     # 4. 保存 OpenMax 所需文件
     openmax_dir = os.path.join(checkpoint_dir, 'openmax_files')

@@ -87,7 +87,7 @@ def visualize_tsne(features, labels, known_classes, unknown_classes,
                    title="t-SNE Visualization", save_path=None, 
                    label_names=None, original_labels=None, perplexity=30, max_iter=1000):
     """
-    使用 t-SNE 可视化特征分布
+    使用 t-SNE 可视化特征分布 (按类别着色)
     
     参数:
         features: (N, feature_dim) 特征矩阵
@@ -105,12 +105,7 @@ def visualize_tsne(features, labels, known_classes, unknown_classes,
     else:
         vis_labels = labels
     
-    # 判断每个样本是已知类还是未知类
-    is_known = np.array([label in known_classes for label in vis_labels])
-    is_unknown = np.array([label in unknown_classes for label in vis_labels])
-    
-    print(f"已知类样本数: {np.sum(is_known)}")
-    print(f"未知类样本数: {np.sum(is_unknown)}")
+    print(f"样本总数: {len(vis_labels)}")
     
     # 执行 t-SNE 降维
     print("正在执行 t-SNE 降维...")
@@ -123,35 +118,20 @@ def visualize_tsne(features, labels, known_classes, unknown_classes,
     features_2d = tsne.fit_transform(features)
     
     # 创建图表
-    plt.figure(figsize=(14, 6))
-    
-    # 左图：区分已知类和未知类
-    ax1 = plt.subplot(1, 2, 1)
-    
-    # 绘制已知类
-    known_mask = is_known
-    if np.any(known_mask):
-        scatter1 = ax1.scatter(features_2d[known_mask, 0], features_2d[known_mask, 1], 
-                              c='blue', alpha=0.6, s=20, label='已知类', edgecolors='none')
-    
-    # 绘制未知类
-    unknown_mask = is_unknown
-    if np.any(unknown_mask):
-        scatter2 = ax1.scatter(features_2d[unknown_mask, 0], features_2d[unknown_mask, 1], 
-                              c='red', alpha=0.6, s=20, label='未知类', edgecolors='none')
-    
-    ax1.set_xlabel('t-SNE 维度 1', fontsize=12)
-    ax1.set_ylabel('t-SNE 维度 2', fontsize=12)
-    ax1.set_title(f'{title}\n(已知类 vs 未知类)', fontsize=14, fontweight='bold')
-    ax1.legend(fontsize=10)
-    ax1.grid(True, alpha=0.3)
-    
-    # 右图：按具体类别着色
-    ax2 = plt.subplot(1, 2, 2)
+    plt.figure(figsize=(10, 8))
+    ax = plt.gca()
     
     # 为每个类别分配颜色
     all_classes = sorted(set(vis_labels))
-    colors = plt.cm.tab20(np.linspace(0, 1, len(all_classes)))
+    # 使用更鲜明的颜色
+    if len(all_classes) <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, len(all_classes)))
+    elif len(all_classes) <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, len(all_classes)))
+    else:
+        # 类别过多时使用 hsv 颜色
+        colors = plt.cm.hsv(np.linspace(0, 1, len(all_classes)))
+
     class_color_map = {cls: colors[i] for i, cls in enumerate(all_classes)}
     
     # 绘制每个类别
@@ -162,15 +142,15 @@ def visualize_tsne(features, labels, known_classes, unknown_classes,
             # 如果是未知类，添加标记
             if cls in unknown_classes:
                 label_name += ' (未知)'
-            ax2.scatter(features_2d[mask, 0], features_2d[mask, 1], 
-                       c=[class_color_map[cls]], alpha=0.6, s=20, 
-                       label=label_name, edgecolors='none')
+            ax.scatter(features_2d[mask, 0], features_2d[mask, 1], 
+                       c=[class_color_map[cls]], alpha=0.7, s=25, 
+                       label=label_name, edgecolors='w', linewidth=0.5)
     
-    ax2.set_xlabel('t-SNE 维度 1', fontsize=12)
-    ax2.set_ylabel('t-SNE 维度 2', fontsize=12)
-    ax2.set_title(f'{title}\n(按类别着色)', fontsize=14, fontweight='bold')
-    ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-    ax2.grid(True, alpha=0.3)
+    ax.set_xlabel('t-SNE 维度 1', fontsize=12)
+    ax.set_ylabel('t-SNE 维度 2', fontsize=12)
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    ax.grid(True, linestyle='--', alpha=0.4)
     
     plt.tight_layout()
     
@@ -180,68 +160,6 @@ def visualize_tsne(features, labels, known_classes, unknown_classes,
     
     plt.show()
 
-def visualize_logits_distribution(logits, labels, known_classes, unknown_classes,
-                                  title="Logits 分布", save_path=None, original_labels=None):
-    """
-    可视化 Logits 的分布情况
-    
-    参数:
-        logits: (N, num_classes) logits 矩阵
-        labels: (N,) 标签数组
-        known_classes: 已知类别列表
-        unknown_classes: 未知类别列表
-        title: 图表标题
-        save_path: 保存路径
-        original_labels: 原始标签数组
-    """
-    if original_labels is not None:
-        vis_labels = original_labels
-    else:
-        vis_labels = labels
-    
-    is_known = np.array([label in known_classes for label in vis_labels])
-    is_unknown = np.array([label in unknown_classes for label in vis_labels])
-    
-    # 计算每个样本的最大 logit 值
-    max_logits = np.max(logits, axis=1)
-    # 计算每个样本的 logit 熵（不确定性）
-    probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
-    entropy = -np.sum(probs * np.log(probs + 1e-10), axis=1)
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # 左图：最大 logit 值分布
-    ax1 = axes[0]
-    if np.any(is_known):
-        ax1.hist(max_logits[is_known], bins=50, alpha=0.6, label='已知类', color='blue', density=True)
-    if np.any(is_unknown):
-        ax1.hist(max_logits[is_unknown], bins=50, alpha=0.6, label='未知类', color='red', density=True)
-    ax1.set_xlabel('最大 Logit 值', fontsize=12)
-    ax1.set_ylabel('密度', fontsize=12)
-    ax1.set_title('最大 Logit 值分布', fontsize=14, fontweight='bold')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 右图：熵分布
-    ax2 = axes[1]
-    if np.any(is_known):
-        ax2.hist(entropy[is_known], bins=50, alpha=0.6, label='已知类', color='blue', density=True)
-    if np.any(is_unknown):
-        ax2.hist(entropy[is_unknown], bins=50, alpha=0.6, label='未知类', color='red', density=True)
-    ax2.set_xlabel('预测熵 (Entropy)', fontsize=12)
-    ax2.set_ylabel('密度', fontsize=12)
-    ax2.set_title('预测不确定性分布', fontsize=14, fontweight='bold')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.suptitle(title, fontsize=16, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Logits 分布图已保存至: {save_path}")
-    
-    plt.show()
 
 def main():
     parser = argparse.ArgumentParser(description='特征可视化脚本')
@@ -303,14 +221,13 @@ def main():
     
     # 4. 提取特征
     print("\n正在提取训练集特征...")
-    train_features, train_logits, train_labels = extract_features(model, train_loader, device)
+    # 只提取特征，忽略 logits
+    train_features, train_labels = extract_features(model, train_loader, device, return_logits=False)
     print(f"训练集特征形状: {train_features.shape}")
-    print(f"训练集 Logits 形状: {train_logits.shape}")
     
     print("\n正在提取测试集特征...")
-    test_features, test_logits, test_labels = extract_features(model, test_loader, device)
+    test_features, test_labels = extract_features(model, test_loader, device, return_logits=False)
     print(f"测试集特征形状: {test_features.shape}")
-    print(f"测试集 Logits 形状: {test_logits.shape}")
     
     # 获取测试集的原始标签（如果数据集有 label_map）
     test_original_labels = None
@@ -339,7 +256,7 @@ def main():
     
     visualize_tsne(
         train_features, train_labels, known_classes, unknown_classes,
-        title="训练集特征分布 (Features Space)",
+        title="训练集特征 t-SNE 可视化",
         save_path=os.path.join(output_dir, 'train_features_tsne.png'),
         label_names=label_names,
         original_labels=train_original_labels,
@@ -351,7 +268,7 @@ def main():
     print("\n正在可视化测试集特征分布...")
     visualize_tsne(
         test_features, test_labels, known_classes, unknown_classes,
-        title="测试集特征分布 (Features Space)",
+        title="测试集特征 t-SNE 可视化",
         save_path=os.path.join(output_dir, 'test_features_tsne.png'),
         label_names=label_names,
         original_labels=test_original_labels,
@@ -359,44 +276,14 @@ def main():
         max_iter=args.max_iter
     )
     
-    # 8. 可视化 Logits 空间（如果维度不太高）
-    if test_logits.shape[1] <= 20:  # 只对类别数不太多的情况做 t-SNE
-        print("\n正在可视化测试集 Logits 分布...")
-        visualize_tsne(
-            test_logits, test_labels, known_classes, unknown_classes,
-            title="测试集 Logits 分布 (Logits Space)",
-            save_path=os.path.join(output_dir, 'test_logits_tsne.png'),
-            label_names=label_names,
-            original_labels=test_original_labels,
-            perplexity=args.perplexity,
-            max_iter=args.max_iter
-        )
-    
-    # 9. 可视化 Logits 统计分布
-    print("\n正在可视化 Logits 统计分布...")
-    visualize_logits_distribution(
-        test_logits, test_labels, known_classes, unknown_classes,
-        title="测试集 Logits 统计分布",
-        save_path=os.path.join(output_dir, 'test_logits_distribution.png'),
-        original_labels=test_original_labels
-    )
-    
-    # 10. 合并训练集和测试集进行对比可视化
+    # 8. 合并训练集和测试集进行对比可视化
     print("\n正在生成合并可视化（训练集+测试集）...")
     all_features = np.vstack([train_features, test_features])
     all_labels_combined = np.concatenate([train_original_labels, test_original_labels])
-    all_is_known = np.array([label in known_classes for label in all_labels_combined])
-    all_is_unknown = np.array([label in unknown_classes for label in all_labels_combined])
-    
-    # 创建标记数组：0=训练集已知类, 1=测试集已知类, 2=测试集未知类
-    split_markers = np.concatenate([
-        np.zeros(len(train_original_labels)),  # 训练集
-        np.ones(len(test_original_labels)) * (1 + all_is_unknown[len(train_original_labels):].astype(int))
-    ])
     
     visualize_tsne(
         all_features, all_labels_combined, known_classes, unknown_classes,
-        title="合并特征分布 (训练集+测试集)",
+        title="合并特征 t-SNE 可视化 (训练集+测试集)",
         save_path=os.path.join(output_dir, 'combined_features_tsne.png'),
         label_names=label_names,
         original_labels=all_labels_combined,

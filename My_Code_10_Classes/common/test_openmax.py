@@ -84,6 +84,9 @@ def main():
     if train_label_map:
         print(f"训练时的标签映射: {train_label_map}")
 
+    openmax_source = train_config.get('openmax_source', 'features')
+    print(f"OpenMax 测试源: {openmax_source}")
+
     # 5. 执行评估
     all_labels = []
     all_preds = []
@@ -113,10 +116,14 @@ def main():
                 # 模型输出已经是针对已知类的 (0..num_classes-1)，对应 known_classes 中的顺序
                 known_logits = current_logits
                 
-                # 使用 Deep Features 进行 OpenMax 计算
-                # 第二个参数必须是 features (与 MAV 所在空间一致，即 Deep Features)
+                # 根据配置选择用于计算距离的数据源
+                if openmax_source == 'logits':
+                    data_for_distance = current_logits
+                else: # 默认为 features
+                    data_for_distance = current_features
+
                 prob = compute_openmax_prob(
-                    known_logits, current_features, mavs_np, weibull_models
+                    data_for_distance, known_logits, mavs_np, weibull_models
                 )
                 
                 # prob 的长度是 len(known_classes) + 1

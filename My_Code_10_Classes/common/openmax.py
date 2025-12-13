@@ -3,57 +3,60 @@ import torch
 import scipy.stats
 import scipy.spatial
 
-def compute_mavs(model, dataloader, num_classes, device):
+def compute_mavs(model, dataloader, num_classes, device, source='features'):
     """
     计算每个类别的平均激活向量 (Mean Activation Vector, MAV)。
-    修改：使用 Deep Features (倒数第二层特征) 而不是 Logits。
     
     参数:
     - model: 训练好的模型。
     - dataloader: 包含训练集数据的 DataLoader。
     - num_classes: 已知类别的数量。
     - device: 'cuda' or 'cpu'。
+    - source: 'features' 或 'logits'，指定计算 MAV 的数据源。
     
     返回:
-    - mavs: (num_classes, feature_dim) 的张量，包含每个类的 MAV (在 Features 空间)。
-    - all_features: 包含所有样本 Features 的张量。
+    - mavs: (num_classes, data_dim) 的张量，包含每个类的 MAV。
+    - all_data: 包含所有样本源数据的张量 (features 或 logits)。
     - all_labels: 包含所有样本标签的列表。
     """
     model.eval()
-    all_features = []
+    all_data = []
     all_labels = []
 
     with torch.no_grad():
         for inputs, labels in dataloader:
             inputs, labels = inputs.to(device), labels.to(device)
-            # 使用 Deep Features (倒数第二层) 而不是 Logits
-            _, features = model(inputs, return_features=True)
-            all_features.append(features.cpu())
+            
+            if source == 'logits':
+                logits, _ = model(inputs, return_features=True)
+                all_data.append(logits.cpu())
+            else: # 默认为 'features'
+                _, features = model(inputs, return_features=True)
+                all_data.append(features.cpu())
+
             all_labels.append(labels.cpu())
 
-    all_features = torch.cat(all_features)
+    all_data = torch.cat(all_data)
     all_labels = torch.cat(all_labels)
     
-    # Features 维度通常是模型的特征维度（如 ResNet1d 的 16，ResNet18_2d 的 512）
-    feature_dim = all_features.shape[1]
-    mavs = torch.zeros(num_classes, feature_dim)
+    data_dim = all_data.shape[1]
+    mavs = torch.zeros(num_classes, data_dim)
     
     for i in range(num_classes):
-        class_features = all_features[all_labels == i]
-        if len(class_features) > 0:
-            mavs[i] = class_features.mean(dim=0)
+        class_data = all_data[all_labels == i]
+        if len(class_data) > 0:
+            mavs[i] = class_data.mean(dim=0)
             
-    return mavs, all_features, all_labels
+    return mavs, all_data, all_labels
 
 
-def fit_weibull(mavs, all_features, all_labels, tail_size=10):
+def fit_weibull(mavs, all_data, all_labels, tail_size=10):
     """
     为每个类别拟合 Weibull 分布模型。
-    修改：使用 Deep Features 而不是 Logits。
     
     参数:
-    - mavs: (num_classes, feature_dim) 的 MAV 张量
-    - all_features: (N, feature_dim) 的所有样本特征张量
+    - mavs: (num_classes, data_dim) 的 MAV 张量
+    - all_data: (N, data_dim) 的所有样本源数据张量 (features 或 logits)
     - all_labels: (N,) 的所有样本标签
     - tail_size: 建议设为每类样本数的 10%-30%。
     """
@@ -61,19 +64,15 @@ def fit_weibull(mavs, all_features, all_labels, tail_size=10):
     weibull_models = []
 
     for i in range(num_classes):
-        class_features = all_features[all_labels == i]
+        class_data = all_data[all_labels == i]
         # 如果某一类的样本太少，动态调整 tail_size
-        current_tail_size = min(tail_size, len(class_features))
+        current_tail_size = min(tail_size, len(class_data))
         
         mav = mavs[i].unsqueeze(0)
         
         # 计算特征与对应 MAV 之间的距离
-        # 使用欧氏距离（对于 Deep Features，欧氏距离通常效果更好）
-        
-        # 手动计算欧氏距离以支持 batch
-        # class_features: (N, D), mav: (1, D)
-        # distances: (N,)
-        distances = torch.norm(class_features - mav, p=2, dim=1)
+        # 使用欧氏距离
+        distances = torch.norm(class_data - mav, p=2, dim=1)
         
         # 对距离进行排序并选择尾部
         sorted_distances = torch.sort(distances, descending=True).values
@@ -87,14 +86,14 @@ def fit_weibull(mavs, all_features, all_labels, tail_size=10):
 
 
 # 修改：使用 Deep Features 进行 OpenMax 计算
-def compute_openmax_prob(logits, features, mavs, weibull_models, alpha=1):
+def compute_openmax_prob(features, logits, mavs, weibull_models, alpha=1):
     """
     参数:
-        logits: (num_classes,) 输入的 Logits（用于计算概率）
-        features: (feature_dim,) Deep Features（用于计算与 MAV 的距离，必须与 MAV 空间一致）
-        mavs: (num_classes, feature_dim) MAV 矩阵
-        weibull_models: Weibull 分布参数列表
-        alpha (int): Top-K 校准参数
+        features: (data_dim,) 用于计算距离的数据 (features 或 logits)。
+        logits: (num_classes,) 输入的原始 Logits（用于计算概率）。
+        mavs: (num_classes, data_dim) MAV 矩阵。
+        weibull_models: Weibull 分布参数列表。
+        alpha (int): Top-K 校准参数。
     """
     num_classes = logits.shape[0]
     distances = np.zeros(num_classes)
