@@ -2,6 +2,7 @@ from .ResNet18_2d import ResNet18 as ResNet2d
 from .ResNet18_1d import ResNet18_1d
 from .ResNet1d import ResNet_test as ResNet1d
 from .MyCNN import MyCNN
+from .MyCNN_1d import MyCNN_1d
 from .DRSN_CW import DRSN_CW_test as DRSN_CW
 from .TimeFreqAttention import create_model as TimeFreqAttention
 
@@ -11,6 +12,7 @@ MODEL_REGISTRY = {
     'ResNet18_1d': ResNet18_1d,
     'ResNet1d': ResNet1d,
     'MyCNN': MyCNN,
+    'MyCNN_1d': MyCNN_1d,
     'DRSN-CW': DRSN_CW,
     'TimeFreqAttention': TimeFreqAttention,
     

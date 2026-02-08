@@ -233,8 +233,8 @@ def main():
         print("单图测试结果已保存: ./results/one.jpg")
         
         # 测试单张图片：Yoda图片（分布外样本，用于测试不确定性）
-        test_single_image(model, "./data/yoda.jpg", uncertainty=use_uncertainty)
-        print("单图测试结果已保存: ./results/yoda.jpg")
+        test_single_image(model, "./data/sigma.jpg", uncertainty=use_uncertainty)
+        print("单图测试结果已保存: ./results/sigma.jpg")
 
 
 if __name__ == "__main__":
