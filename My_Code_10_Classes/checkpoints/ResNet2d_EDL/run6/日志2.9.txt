@@ -1,7 +1,10 @@
-# --------------------------------------------------
-# 数据预处理配置文件 (config.yaml)
-# --------------------------------------------------
+The MAIN ISSUE now is that unkonwn categories are easily recognized as Class 7
+I now need to visualize the feature vectors because I believe it may be due to the overlap of Class 7 and unknown category feature vectors.
 
+
+
+以下为配置
+--------------------------------------------------------------------------
 data:
   type: wpt
   # 原始 .mat 数据文件所在的目录路径
@@ -36,9 +39,9 @@ data:
   # --- Open-set 配置 ---
   openset:
     # 训练时视为已知类的标签列表
-    known_classes: [0,1,2,3,4,5,7,8,9]
+    known_classes: [0,1,2,4,5,7,8]
     # 测试时视为未知类的标签列表
-    unknown_classes: [6]
+    unknown_classes: [3,6,9]
 
 # --------------------------------------------------
 # 模型和训练配置文件
@@ -47,23 +50,20 @@ data:
 model:
   # 模型类型: ResNet1d
   type: 'ResNet2d'
-  num_classes: 9
+  num_classes: 7
 
 train:
   num_epochs: 60
   
   batch_size: 32
   learning_rate: 0.0001
-  checkpoint_dir: 'checkpoints/ResNet2d_EDL/run9'
-  notes: 'ResNet2d + EDL (MSE损失) 类别6为未知类,在指定轮数后加上centerloss'
+  checkpoint_dir: 'checkpoints/ResNet2d_EDL/run6'
+  notes: 'ResNet2d + EDL (MSE损失) 类别3,6,9为未知类'
   
   # EDL相关配置
   edl_loss_type: 'mse'  # 'mse', 'digamma', 'log'
   edl_annealing_step: 40  # KL退火步数
   
-  center_loss_lambda: 0.005
-  center_loss_start_epoch: 40
-  center_loss_lr: 0.0001
   # 设备配置（可选）：'cuda' 或 'cpu'，如果不指定则自动检测
   device: 'cuda'  # 取消注释此行以强制使用 GPU
   
@@ -71,9 +71,9 @@ train:
   snr_db: null  # 不添加噪声（默认）。如需添加噪声，设置为数值，如 10 表示 10dB 信噪比
   
   # 优化器配置
-  optimizer: 'SGD'
-  momentum: 0.9
-  weight_decay: 0.0001
+  optimizer: 'Adam'
+  # momentum: 0.9
+  # weight_decay: 0.0001
 
   # 学习率调度器配置
   scheduler:
@@ -81,3 +81,4 @@ train:
     scheduler_type: 'StepLR'
     step_size: 40
     gamma: 0.1
+----------------------------------------------------------------------------------------
