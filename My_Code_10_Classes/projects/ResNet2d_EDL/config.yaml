@@ -54,8 +54,8 @@ train:
   
   batch_size: 32
   learning_rate: 0.0001
-  checkpoint_dir: 'checkpoints/ResNet2d_EDL/run9'
-  notes: 'ResNet2d + EDL (MSE损失) 类别6为未知类,在指定轮数后加上centerloss'
+  checkpoint_dir: 'checkpoints/ResNet2d_EDL/run11'
+  notes: 'ResNet2d + EDL (MSE损失) 类别6为未知类,在指定轮数后加上centerloss,最后微调'
   
   # EDL相关配置
   edl_loss_type: 'mse'  # 'mse', 'digamma', 'log'

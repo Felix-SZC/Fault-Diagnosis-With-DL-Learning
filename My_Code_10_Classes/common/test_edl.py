@@ -42,8 +42,12 @@ def get_dataset(data_config, split='test', filter_classes=None):
 def main():
     parser = argparse.ArgumentParser(description='EDL Evaluation Script')
     parser.add_argument('--config', type=str, required=True, help='Path to the experiment config file')
+    parser.add_argument('--checkpoint', type=str, default=None, 
+                       help='模型权重文件路径（.pth文件）。如果未指定，则从配置文件的checkpoint_dir读取')
     parser.add_argument('--uncertainty_threshold', type=float, default=0.5, 
                        help='Uncertainty threshold for unknown class detection (default: 0.5)')
+    parser.add_argument('--output_dir', type=str, default=None,
+                       help='结果输出目录。如果未指定，则自动从checkpoint路径推断')
     args = parser.parse_args()
 
     # 1. 加载配置
@@ -52,16 +56,48 @@ def main():
     model_config = config['model']
     train_config = config['train']
     
-    checkpoint_dir = train_config['checkpoint_dir']
-    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
 
+    # 2. 确定模型路径和输出目录
+    if args.checkpoint:
+        model_path = args.checkpoint
+        # 从checkpoint路径推断checkpoint目录
+        checkpoint_dir = os.path.dirname(os.path.abspath(model_path))
+    else:
+        # 使用配置文件中的路径
+        checkpoint_dir = train_config['checkpoint_dir']
+        model_path = os.path.join(checkpoint_dir, 'best_model.pth')
+    
+    if not os.path.exists(model_path):
+        print(f"错误: 在 {model_path} 未找到模型文件")
+        return
+    
+    # 确定输出目录
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        # 自动推断：在checkpoint目录下创建test子目录
+        output_dir = os.path.join(checkpoint_dir, 'test')
+    
     # 2. 加载模型
     model = get_model(model_config.get('type'), num_classes=model_config.get('num_classes')).to(device)
-    model.load_state_dict(torch.load(os.path.join(checkpoint_dir, 'best_model.pth'), weights_only=True))
+    
+    # 加载模型权重
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        elif 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint
+    
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
-    print("模型加载成功。")
+    print(f"从 {model_path} 加载模型成功。")
 
     # 3. 准备测试数据
     known_classes = data_config['openset']['known_classes']
@@ -234,7 +270,7 @@ def main():
         plt.legend(loc="lower right")
         
         # 保存ROC曲线图
-        roc_curve_path = os.path.join(checkpoint_dir, 'test', 'roc_curve.png')
+        roc_curve_path = os.path.join(output_dir, 'roc_curve.png')
         os.makedirs(os.path.dirname(roc_curve_path), exist_ok=True)
         plt.savefig(roc_curve_path)
         print(f"ROC 曲线已保存至: {roc_curve_path}")
@@ -296,7 +332,8 @@ def main():
     plt.tight_layout()
     
     # 保存混淆矩阵
-    cm_path = os.path.join(checkpoint_dir, 'test', 'confusion_matrix.png')
+    os.makedirs(output_dir, exist_ok=True)
+    cm_path = os.path.join(output_dir, 'confusion_matrix.png')
     plt.savefig(cm_path, dpi=150)
     print(f"混淆矩阵已保存至: {cm_path}")
     plt.close()

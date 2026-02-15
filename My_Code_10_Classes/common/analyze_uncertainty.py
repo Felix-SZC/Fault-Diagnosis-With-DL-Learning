@@ -63,7 +63,20 @@ def analyze_model(model, dataloader, num_classes, device):
         for inputs, labels in dataloader:
             inputs = inputs.to(device)
             
-            logits, features = model(inputs, return_features=True)
+            # 尝试使用return_features，如果不支持则只获取logits
+            try:
+                output = model(inputs, return_features=True)
+                if isinstance(output, tuple):
+                    logits = output[0]
+                else:
+                    logits = output
+            except TypeError:
+                # 模型不支持return_features参数
+                output = model(inputs)
+                if isinstance(output, tuple):
+                    logits = output[0]
+                else:
+                    logits = output
             
             evidence = relu_evidence(logits)
             alpha = evidence + 1
@@ -128,6 +141,10 @@ def plot_distributions(df, known_classes, label_names, output_dir):
 def main():
     parser = argparse.ArgumentParser(description='模型不确定性与证据量分析脚本')
     parser.add_argument('--config', type=str, required=True, help='配置文件路径')
+    parser.add_argument('--checkpoint', type=str, default=None, 
+                        help='模型权重文件路径（.pth文件）。如果未指定，则从配置文件的checkpoint_dir读取')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='结果输出目录。如果未指定，则自动从checkpoint路径推断')
     args = parser.parse_args()
     
     # 1. 加载配置
@@ -156,16 +173,36 @@ def main():
     print(f"使用设备: {device}")
     
     # 2. 加载模型
-    checkpoint_dir = train_config['checkpoint_dir']
     num_classes = model_config.get('num_classes')
-    
     model = get_model(model_config.get('type'), num_classes=num_classes).to(device)
-    model_path = os.path.join(checkpoint_dir, 'best_model.pth')
+    
+    # 确定模型路径
+    if args.checkpoint:
+        model_path = args.checkpoint
+        # 从checkpoint路径推断checkpoint目录
+        checkpoint_dir = os.path.dirname(os.path.abspath(model_path))
+    else:
+        # 使用配置文件中的路径
+        checkpoint_dir = train_config['checkpoint_dir']
+        model_path = os.path.join(checkpoint_dir, 'best_model.pth')
+    
     if not os.path.exists(model_path):
-        print(f"错误: 在 {model_path} 未找到模型文件 'best_model.pth'")
+        print(f"错误: 在 {model_path} 未找到模型文件")
         return
-        
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    
+    # 加载模型权重
+    checkpoint = torch.load(model_path, map_location=device)
+    if isinstance(checkpoint, dict):
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        elif 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint
+    
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     print(f"从 {model_path} 加载模型成功。")
     
@@ -181,7 +218,11 @@ def main():
     print("分析完成。")
 
     # 5. 设置输出目录并保存结果
-    output_dir = os.path.join(checkpoint_dir, 'test')
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        # 自动推断：在checkpoint目录下创建test子目录
+        output_dir = os.path.join(checkpoint_dir, 'test')
     os.makedirs(output_dir, exist_ok=True)
     
     csv_path = os.path.join(output_dir, 'uncertainty_analysis.csv')
