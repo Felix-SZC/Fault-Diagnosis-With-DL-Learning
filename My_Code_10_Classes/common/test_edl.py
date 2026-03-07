@@ -319,14 +319,15 @@ def main():
     cm_labels = np.array(cm_labels)
     cm_preds = np.array(cm_preds)
     
-    # 计算混淆矩阵
+    # 计算混淆矩阵（行归一化百分比）
     cm = confusion_matrix(cm_labels, cm_preds)
-    
-    # 绘制混淆矩阵
+    row_sum = cm.sum(axis=1, keepdims=True)
+    cm_pct = np.where(row_sum > 0, cm.astype(float) / row_sum * 100, 0)
+    annot = np.array([[f'{cm_pct[i,j]:.1f}%' for j in range(cm_pct.shape[1])] for i in range(cm_pct.shape[0])])
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+    sns.heatmap(cm_pct, annot=annot, fmt='', cmap='Blues',
                 xticklabels=label_names, yticklabels=label_names)
-    plt.title('Confusion Matrix (EDL)')
+    plt.title('Confusion Matrix (EDL, %)')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
     plt.tight_layout()

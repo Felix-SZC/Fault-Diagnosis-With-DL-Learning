@@ -45,33 +45,30 @@ data:
 # --------------------------------------------------
 
 model:
-  # 模型类型: ResNet1d
-  type: 'ResNet2d'
+  # 模型类型: ResNet18_2d_Binary (带二分类头的 EDL 模型)
+  type: 'ResNet18_2d_Binary'
   num_classes: 9
+  # 是否启用主分类头：true=主头+二分类头，false=仅二分类头
+  use_main_head: false
 
 train:
   num_epochs: 60
   
   batch_size: 32
   learning_rate: 0.0001
-  checkpoint_dir: 'checkpoints/ResNet2d_EDL/run1'
-  notes: 'ResNet2d + EDL'
+  checkpoint_dir: 'checkpoints/ResNet2d_EDL_Binary/NoBinary/run1'
+  notes: 'ResNet2d + EDL (MSE损失) 没有二分类头'
   
   # EDL相关配置
   edl_loss_type: 'mse'  # 'mse', 'digamma', 'log'
   edl_annealing_step: 40  # KL退火步数
+  binary_loss_weight: 1.0  # 二分类损失权重（仅当 use_main_head 为 true 时主损失+二分类损失会加权）
   
-  center_loss_lambda: 0
-  center_loss_start_epoch: 40
-  center_loss_lr: 0.0001
   # 设备配置（可选）：'cuda' 或 'cpu'，如果不指定则自动检测
-  device: 'cuda'  # 取消注释此行以强制使用 GPU
-  
-  # 数据增强配置（可选）
-  snr_db: null  # 不添加噪声（默认）。如需添加噪声，设置为数值，如 10 表示 10dB 信噪比
+  device: 'cuda'
   
   # 优化器配置
-  optimizer: 'Adam'
+  optimizer: 'SGD'
   momentum: 0.9
   weight_decay: 0.0001
 

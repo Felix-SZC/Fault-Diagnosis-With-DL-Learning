@@ -1,4 +1,6 @@
 from .ResNet18_2d import ResNet18 as ResNet2d
+from .ResNet18_2d_Light import ResNet18_2d_Light
+from .ResNet18_2d_Binary import ResNet18_Binary as ResNet2dBinary
 from .ResNet18_1d import ResNet18_1d
 from .ResNet1d import ResNet_test as ResNet1d
 from .MyCNN import MyCNN
@@ -9,6 +11,8 @@ from .TimeFreqAttention import create_model as TimeFreqAttention
 # 模型注册表
 MODEL_REGISTRY = {
     'ResNet18_2d': ResNet2d,
+    'ResNet18_2d_Light': ResNet18_2d_Light,
+    'ResNet18_2d_Binary': ResNet2dBinary,
     'ResNet18_1d': ResNet18_1d,
     'ResNet1d': ResNet1d,
     'MyCNN': MyCNN,

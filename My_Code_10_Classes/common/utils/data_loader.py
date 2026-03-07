@@ -8,31 +8,46 @@ from PIL import Image
 class LabeledImageDataset(Dataset):
     """
     通用的图像数据集类。
-    从文件名 'name_label.ext' 中解析标签。
-    适用于 Handcraft_ResNet, Handcraft_MYCNN 等项目。
+    从文件名 'name_label.ext' 中解析标签（如 123_5.png -> 5）。
+    适用于 Handcraft_ResNet, STFT 时频图 等项目。
+    - filter_classes: 若提供，只保留这些类别并重映射为 0..K-1。
     """
-    def __init__(self, path, transform=None):
+    def __init__(self, path, transform=None, filter_classes: list = None):
         self.path = path
-        self.files = [f for f in os.listdir(path) if f.endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
         self.transform = transform
+        all_files = [f for f in os.listdir(path) if f.endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+        self.label_map = None
+        if filter_classes is not None:
+            self.files = []
+            for f in all_files:
+                try:
+                    lab = int(f.split('_')[-1].split('.')[0])
+                except (ValueError, IndexError):
+                    continue
+                if lab in filter_classes:
+                    self.files.append(f)
+            unique = sorted(set(int(f.split('_')[-1].split('.')[0]) for f in self.files))
+            self.label_map = {orig: i for i, orig in enumerate(unique)}
+        else:
+            self.files = all_files
 
     def __len__(self):
         return len(self.files)
 
+    def _parse_label(self, filename):
+        return int(filename.split('_')[-1].split('.')[0])
+
     def __getitem__(self, idx):
         img_name = os.path.join(self.path, self.files[idx])
-        
-        # 尝试以灰度图打开，如果失败则以RGB模式打开
         try:
             image = Image.open(img_name).convert('L')
         except IOError:
             image = Image.open(img_name).convert('RGB')
-        
-        label = int(self.files[idx].split('_')[-1].split('.')[0])
-        
+        label = self._parse_label(self.files[idx])
+        if self.label_map is not None:
+            label = self.label_map[label]
         if self.transform:
             image = self.transform(image)
-            
         return image, label
 
 class RawSignalDataset(Dataset):

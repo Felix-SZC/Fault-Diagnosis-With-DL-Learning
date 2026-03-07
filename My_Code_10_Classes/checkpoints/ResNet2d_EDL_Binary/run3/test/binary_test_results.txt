@@ -1,0 +1,12 @@
+Closed-set Accuracy: 94.44%
+Uncertainty Threshold: 0.5
+Average Binary Accuracy (known only): 95.93%
+Head 0 (Class 0): 100.00%
+Head 1 (Class 1): 88.89%
+Head 2 (Class 2): 98.89%
+Head 3 (Class 3): 100.00%
+Head 4 (Class 4): 88.89%
+Head 5 (Class 5): 88.89%
+Head 6 (Class 7): 100.00%
+Head 7 (Class 8): 99.44%
+Head 8 (Class 9): 98.33%

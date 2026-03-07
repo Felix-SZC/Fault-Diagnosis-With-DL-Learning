@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -111,11 +112,14 @@ def main():
     with open(os.path.join(checkpoint_dir, 'test_report.txt'), 'w') as f:
         f.write(report)
 
-    # 混淆矩阵
+    # 混淆矩阵（行归一化百分比）
     cm = confusion_matrix(all_labels, all_preds)
+    row_sum = cm.sum(axis=1, keepdims=True)
+    cm_pct = np.where(row_sum > 0, cm.astype(float) / row_sum * 100, 0)
+    annot = np.array([[f'{cm_pct[i,j]:.1f}%' for j in range(cm_pct.shape[1])] for i in range(cm_pct.shape[0])])
     plt.figure(figsize=(8, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title('Confusion Matrix')
+    sns.heatmap(cm_pct, annot=annot, fmt='', cmap='Blues')
+    plt.title('Confusion Matrix (%)')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
     plt.savefig(os.path.join(checkpoint_dir, 'test_confusion_matrix.png'))

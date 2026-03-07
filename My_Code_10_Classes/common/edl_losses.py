@@ -184,11 +184,14 @@ def mse_loss(y, alpha, epoch_num, num_classes, annealing_step, device=None):
     # 数据拟合项：期望均方误差
     loglikelihood = loglikelihood_loss(y, alpha, device=device)
     
-    # 计算退火系数：从0线性增长到1
-    annealing_coef = torch.min(
-        torch.tensor(1.0, dtype=torch.float32),
-        torch.tensor(epoch_num / annealing_step, dtype=torch.float32),
-    )
+    # 退火系数：annealing_step<=0 表示关闭退火（KL 权重恒为 0）
+    if annealing_step is None or annealing_step <= 0:
+        annealing_coef = torch.tensor(0.0, dtype=torch.float32, device=device)
+    else:
+        annealing_coef = torch.min(
+            torch.tensor(1.0, dtype=torch.float32, device=device),
+            torch.tensor(epoch_num / annealing_step, dtype=torch.float32, device=device),
+        )
     
     # 关键操作：只对非真实类别进行KL正则化
     # 对于真实类别：kl_alpha = 1（不惩罚）
@@ -232,11 +235,14 @@ def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None
     # 这是期望损失的核心项
     A = torch.sum(y * (func(S) - func(alpha)), dim=1, keepdim=True)
     
-    # 计算退火系数
-    annealing_coef = torch.min(
-        torch.tensor(1.0, dtype=torch.float32),
-        torch.tensor(epoch_num / annealing_step, dtype=torch.float32),
-    )
+    # 退火系数：annealing_step<=0 表示关闭退火（KL 权重恒为 0）
+    if annealing_step is None or annealing_step <= 0:
+        annealing_coef = torch.tensor(0.0, dtype=torch.float32, device=device)
+    else:
+        annealing_coef = torch.min(
+            torch.tensor(1.0, dtype=torch.float32, device=device),
+            torch.tensor(epoch_num / annealing_step, dtype=torch.float32, device=device),
+        )
     
     # 只对非真实类别进行KL正则化
     kl_alpha = (alpha - 1) * (1 - y) + 1
@@ -248,7 +254,7 @@ def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None
     return A + kl_div
 
 
-def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=None):
+def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
     """
     EDL MSE损失函数（完整版本）
     对应论文中的 Eq.5
@@ -260,6 +266,7 @@ def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=
         num_classes: 类别总数
         annealing_step: KL退火步数（通常为10）
         device: 计算设备
+        sample_weight: 可选，形状 [batch_size]，用于类别不平衡时对正类样本加权
     
     Returns:
         torch.Tensor: 平均损失值（标量）
@@ -272,88 +279,43 @@ def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=
     if not device:
         device = get_device()
     
-    # 将网络输出转换为证据
     evidence = relu_evidence(output)
-    
-    # 计算Dirichlet参数：alpha = evidence + 1
-    # 确保每个alpha >= 1（Dirichlet分布的要求）
     alpha = evidence + 1
     
-    # 计算损失并取平均
-    loss = torch.mean(
-        mse_loss(target, alpha, epoch_num, num_classes, annealing_step, device=device)
-    )
+    per_sample = mse_loss(target, alpha, epoch_num, num_classes, annealing_step, device=device)
+    if sample_weight is not None:
+        sample_weight = sample_weight.to(device).float().view(-1, 1)
+        loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)
+    else:
+        loss = per_sample.mean()
     return loss
 
 
-def edl_log_loss(output, target, epoch_num, num_classes, annealing_step, device=None):
-    """
-    EDL Log损失函数（完整版本）
-    对应论文中的 Eq.3（负对数期望似然）
-    
-    Args:
-        output: 网络原始输出（logits）
-        target: one-hot编码的真实标签
-        epoch_num: 当前训练轮数
-        num_classes: 类别总数
-        annealing_step: KL退火步数
-        device: 计算设备
-    
-    Returns:
-        torch.Tensor: 平均损失值（标量）
-    
-    数学公式：
-        -log E[p(y|x)] = -Σ y_k * log(α_k / S)
-    """
+def edl_log_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
+    """EDL Log损失；sample_weight 可选，用于类别不平衡时对正类加权。"""
     if not device:
         device = get_device()
-    
-    # 将网络输出转换为证据和alpha
     evidence = relu_evidence(output)
     alpha = evidence + 1
-    
-    # 使用log函数计算损失
-    loss = torch.mean(
-        edl_loss(
-            torch.log, target, alpha, epoch_num, num_classes, annealing_step, device
-        )
-    )
+    per_sample = edl_loss(torch.log, target, alpha, epoch_num, num_classes, annealing_step, device)
+    if sample_weight is not None:
+        sample_weight = sample_weight.to(device).float().view(-1, 1)
+        loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)
+    else:
+        loss = per_sample.mean()
     return loss
 
 
-def edl_digamma_loss(
-    output, target, epoch_num, num_classes, annealing_step, device=None
-):
-    """
-    EDL Digamma损失函数（完整版本）
-    对应论文中的 Eq.4（期望交叉熵）
-    
-    Args:
-        output: 网络原始输出（logits）
-        target: one-hot编码的真实标签
-        epoch_num: 当前训练轮数
-        num_classes: 类别总数
-        annealing_step: KL退火步数
-        device: 计算设备
-    
-    Returns:
-        torch.Tensor: 平均损失值（标量）
-    
-    数学公式：
-        E[-log p(y|x)] = -Σ y_k * [ψ(S) - ψ(α_k)]
-        其中ψ是digamma函数
-    """
+def edl_digamma_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
+    """EDL Digamma损失；sample_weight 可选，用于类别不平衡时对正类加权。"""
     if not device:
         device = get_device()
-    
-    # 将网络输出转换为证据和alpha
     evidence = relu_evidence(output)
     alpha = evidence + 1
-    
-    # 使用digamma函数计算损失
-    loss = torch.mean(
-        edl_loss(
-            torch.digamma, target, alpha, epoch_num, num_classes, annealing_step, device
-        )
-    )
+    per_sample = edl_loss(torch.digamma, target, alpha, epoch_num, num_classes, annealing_step, device)
+    if sample_weight is not None:
+        sample_weight = sample_weight.to(device).float().view(-1, 1)
+        loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)
+    else:
+        loss = per_sample.mean()
     return loss
