@@ -1,5 +1,5 @@
-Uncertainty Threshold: 0.44
-Closed-set Accuracy (Ensemble): 87.78%
+Uncertainty Threshold: 0.43
+Closed-set Accuracy (Ensemble): 75.00%
 
 --- 各模型单独（二分类，仅已知类）---
 Model 0 (Class 0): 100.00%
@@ -13,7 +13,7 @@ Model 7 (Class 8): 99.44%
 Model 8 (Class 9): 96.67%
 Average Binary Accuracy: 98.15%
 
-F1 (OOD): 0.3043
+F1 (OOD): 0.4500
 AUROC: 0.8638
-FAR: 10.00%
-MAR: 66.67%
+FAR: 22.78%
+MAR: 14.29%
