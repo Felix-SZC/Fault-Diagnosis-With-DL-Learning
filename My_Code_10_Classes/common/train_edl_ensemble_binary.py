@@ -144,7 +144,7 @@ def main():
         model_kw['input_channels'] = sample.shape[1] if sample.dim() >= 2 else sample.shape[0]
 
     # 5. 依次训练 K 个二分类模型（k = 0..K-1）
-    for k in range(8,K):
+    for k in range(K):
         print(f"\n{'='*60}")
         print(f"训练二分类模型 k = {k} / {K-1}（是否属于第 k 类）")
         print(f"{'='*60}")

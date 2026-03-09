@@ -31,13 +31,13 @@ model:
   num_classes: 9
 
 train:
-  num_epochs: 60
+  num_epochs: 80
   batch_size: 32
   learning_rate: 0.0001
-  checkpoint_dir: 'checkpoints/ResNet2d_EDL_EnsembleBinary/6/annealing_step_60/ResNet2dlight'
+  checkpoint_dir: 'checkpoints/ResNet2d_EDL_EnsembleBinary/6/annealing_step_80/ResNet2dlight'
   notes: 'EDL + K independent binary small models (ResNet2d, 2-class EDL per class)'
   edl_loss_type: 'mse'
-  edl_annealing_step: 60   # 设为 0 关闭 KL 退火；大于 0 时从 0 线性增至 1
+  edl_annealing_step: 80   # 设为 0 关闭 KL 退火；大于 0 时从 0 线性增至 1
   device: 'cuda'
   optimizer: 'SGD'
   momentum: 0.9
