@@ -98,7 +98,7 @@ def main():
 
     # 1. 加载配置
     config = load_config(args.config)
-    data_config = config['data']
+    data_config = config['data'] 
     model_config = config['model']
     train_config = config['train']
 
