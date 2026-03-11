@@ -94,6 +94,10 @@ def main():
                         help='不确定度聚合方式：mean=(1/K)*sum(u_k)，winner=取赢家头 u_{argmax p_yes}')
     parser.add_argument('--uncertainty_mode', type=str, default='edl', choices=['edl', 'max_prob'],
                         help="不确定性: 'edl' (u_k=2/S_k 聚合) 或 'max_prob' (1 - max P_yes)")
+    parser.add_argument('--save_detail', action='store_true',
+                        help='保存样本级/模型级详细信息（仅在 uncertainty_mode=edl 时生效）')
+    parser.add_argument('--detail_target_class', type=int, default=None,
+                        help='关注的预测类别（可选，仅用于后续分析脚本筛选，不影响保存内容）')
     args = parser.parse_args()
 
     # 1. 加载配置
@@ -167,11 +171,23 @@ def main():
     all_uncertainties = []
     binary_preds_list = []  # 每 batch 的 [B, K]，模型 k 预测「是否第 k 类」1/0
 
+    # 若需要保存样本级/模型级详细信息，在循环中累积 logits/p_yes/u_k 等
+    if args.save_detail and args.uncertainty_mode != 'edl':
+        print("警告: save_detail 目前仅支持 uncertainty_mode='edl'，将忽略 save_detail。")
+        args.save_detail = False
+    detail_logits_yes_batches = []
+    detail_logits_no_batches = []
+    detail_p_yes_batches = []
+    detail_u_k_batches = []
+    detail_u_mean_batches = []
+
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs = inputs.to(device)
             p_yes_list = []
             u_k_list = []
+            batch_logits_yes = []
+            batch_logits_no = []
             for k in range(K):
                 logits_k = models[k](inputs)
                 evidence_k = relu_evidence(logits_k)
@@ -181,6 +197,9 @@ def main():
                 p_yes_list.append(probs_k[:, 1])
                 if args.uncertainty_mode == 'edl':
                     u_k_list.append(2.0 / S_k)
+                if args.save_detail and args.uncertainty_mode == 'edl':
+                    batch_logits_yes.append(logits_k[:, 1].detach().cpu().numpy())
+                    batch_logits_no.append(logits_k[:, 0].detach().cpu().numpy())
             p_yes = torch.stack(p_yes_list, dim=1)
             binary_preds_list.append((p_yes > 0.5).cpu().numpy().astype(np.int32))
             if args.uncertainty_mode == 'max_prob':
@@ -192,6 +211,16 @@ def main():
                 else:
                     winner = p_yes.argmax(dim=1)
                     uncertainty = u_k_stack[torch.arange(u_k_stack.size(0), device=u_k_stack.device), winner].cpu().numpy()
+                if args.save_detail:
+                    # 保存当前 batch 的 logits/p_yes/u_k 以及 u_mean
+                    detail_p_yes_batches.append(p_yes.cpu().numpy())
+                    detail_u_k_batches.append(u_k_stack.cpu().numpy())
+                    u_mean_batch = u_k_stack.mean(dim=1).cpu().numpy()
+                    detail_u_mean_batches.append(u_mean_batch)
+                    if batch_logits_yes and batch_logits_no:
+                        import numpy as _np_internal
+                        detail_logits_yes_batches.append(_np_internal.stack(batch_logits_yes, axis=1))
+                        detail_logits_no_batches.append(_np_internal.stack(batch_logits_no, axis=1))
             preds_local = p_yes.argmax(dim=1).cpu().numpy()
 
             # 按不确定性阈值判 OOD：u > 阈值 → 预测为 -1，否则映射回类别
@@ -294,6 +323,37 @@ def main():
         print(f"ROC 曲线已保存: {os.path.join(output_dir, 'roc_curve.png')}")
     else:
         print("测试集中无未知类，跳过开放集指标与 ROC。")
+
+    # 7.1 若启用 save_detail，则将样本级/模型级详细信息保存到 test_detail/detail_raw.npz
+    if args.save_detail:
+        import pandas as pd  # 与其他分析脚本风格一致，即使当前不直接使用 DataFrame
+        detail_dir = os.path.join(output_dir, 'test_detail')
+        os.makedirs(detail_dir, exist_ok=True)
+        if detail_logits_yes_batches and detail_logits_no_batches:
+            logits_yes_all = np.concatenate(detail_logits_yes_batches, axis=0)  # [N, K]
+            logits_no_all = np.concatenate(detail_logits_no_batches, axis=0)    # [N, K]
+        else:
+            logits_yes_all = None
+            logits_no_all = None
+        p_yes_all = np.concatenate(detail_p_yes_batches, axis=0) if detail_p_yes_batches else None
+        u_k_all = np.concatenate(detail_u_k_batches, axis=0) if detail_u_k_batches else None
+        u_mean_all = np.concatenate(detail_u_mean_batches, axis=0) if detail_u_mean_batches else None
+        sample_idx = np.arange(all_labels.shape[0], dtype=np.int64)
+        is_ood = np.isin(all_labels, unknown_classes).astype(np.int32)
+        detail_path = os.path.join(detail_dir, 'detail_raw.npz')
+        np.savez(
+            detail_path,
+            sample_idx=sample_idx,
+            true_label=all_labels,
+            pred_label=all_preds,
+            is_ood=is_ood,
+            logits_yes=logits_yes_all,
+            logits_no=logits_no_all,
+            p_yes=p_yes_all,
+            u=u_k_all,
+            u_mean=u_mean_all,
+        )
+        print(f"样本级/模型级详细信息已保存至: {detail_path}")
 
     # 8. 混淆矩阵（已知类 + Unknown）
     label_names = [f'Class_{c}' for c in known_classes] + ['Unknown']
