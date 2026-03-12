@@ -12,13 +12,14 @@ __pycache__/
 # --- 数据及模型产物 ---
 # 使用通配符进行更广泛的匹配，以避免使用特定的路径规则。
 
-# 忽略所有 STFTimages 目录下的 .png 文件
+# 忽略所有 STFTimages 目录下的 .png 文件，以及其它自动生成的 .png 图片
 **/STFTimages/**/*.png
+**/*.png
 
-# 忽略所有 'results' 目录下的内容。
+# 忽略所有名称包含 'results' 的目录及其子目录下的内容（如 NEW 里的实验结果、metrics 等）。
 # 如果希望追踪这个目录本身（即使它是空的），
 # 可以在该目录内创建一个名为 '.gitkeep' 的空文件。
-**/results/*
+**/results*/**
 
 # 不要忽略 .gitkeep 文件，这样空目录就可以被追踪。
 !**/.gitkeep
@@ -36,3 +37,7 @@ samples_data.csv
 # 忽略模型检查点文件（.pth），体积大且可通过重新训练生成
 **/checkpoints/**/*.pth
 **/checkpoints/**/*.pth.tar
+# 进一步忽略所有位置的 .pth / .pth.tar
+**/*.pth
+**/*.pth.tar
+*.pth

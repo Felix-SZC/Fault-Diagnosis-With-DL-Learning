@@ -1,0 +1,22 @@
+loss = 0 * loss_0 + W1 * loss_1 + W2 * loss_2 + 1 * loss_3
+
+W1=0.01 ，W2=0.01，实验结果，能找到AUROC很好的。接下来，设置W1和W2有梯度 W1=0.01，W2=0.1 效果稍差
+
+1. 现在开始设置loss中的kl和var开关（W1=0.01，W2=0.1）
+
+            loss_1 = mse_loss(y_onehot, diff_01, epoch, num_classes, annealing_step, device, var_only=False, kl=False).mean()
+            loss_2 = mse_loss(y_onehot, diff_12, epoch, num_classes, annealing_step, device, var_only=False, kl=False).mean()
+            loss_3 = mse_loss(y_onehot, alpha2, epoch, num_classes, annealing_step, device, var_only=False,kl=True).mean()
+
+
+            loss = w1 * loss_1 + w2 * loss_2 + loss_3
+效果不理想
+
+
+2. 接下来尝试（W1=0.01，W2=0.01），kl和var开关同上。实验效果稍好，能找到还可以的，重要的是能看出3层的分布趋势变化
+
+3.接下来尝试（W1=0.1，W2=0.1），kl和var开关同上。实验效果非常好，也能看出3层分布变化
+
+4. 接下来尝试（W1=0.5，W2=0.5），kl和var开关同上。效果不如（W1=0.1，W2=0.1）
+
+5. 接下来尝试（W1=1，W2=1），kl和var开关同上
