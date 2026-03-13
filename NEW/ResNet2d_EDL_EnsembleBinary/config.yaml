@@ -1,0 +1,52 @@
+# =========================================================
+# ResNet2d EDL Ensemble Binary (支持 npy 打包数据集)
+# 
+# 适用于：针对已知类训练 K 个小二分类模型；在测试时遇到
+# unknown_classes 时通过证据不确定度将其判为 OOD。
+# =========================================================
+
+data:
+  # 数据集目录，必须包含 X_train.npy, y_train.npy, X_test.npy, y_test.npy
+  # 这里以风电数据为例
+  data_dir: '../Kong_code&&data/数据打包（风电）/1'
+  
+  openset:
+    # 已知类：即我们希望模型训练和认识的类别
+    # 按照数据打包中的标签文本原样填写即可
+    known_classes:
+      - '1正常'
+      - '2二级小齿轮点蚀'
+      - '4二级后轴承滚动体'
+      - '5二级后轴承磨损'
+      - '6行星轴承滚珠磨损'
+      
+    # 未知类（OOD）：模型在训练期间完全不认识，仅在测试集出现，用于验证未知发现能力
+    unknown_classes:
+      - '3二级后轴承保持架'
+
+model:
+  type: 'ResNet18_2d_Light'
+
+train:
+  num_epochs: 100
+  batch_size: 256
+  learning_rate: 0.0005
+  
+  # 模型保存位置
+  checkpoint_dir: 'checkpoints/wind_power_ood'
+  notes: 'EDL Ensemble Binary for wind power npy data'
+  
+  # EDL 损失函数：可选 'mse', 'digamma', 'log'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 500
+  
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0001
+  
+  scheduler:
+    use_scheduler: true
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
