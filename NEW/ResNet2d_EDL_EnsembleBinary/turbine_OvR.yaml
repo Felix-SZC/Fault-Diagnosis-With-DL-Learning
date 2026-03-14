@@ -25,23 +25,23 @@ data:
       - '3二级后轴承保持架'
 
 model:
-  type: 'ResNet18_2d_Light'
+  type: 'ResNet18_2d'
 
 train:
-  num_epochs: 100
+  num_epochs: 80
   batch_size: 256
-  learning_rate: 0.0005
+  learning_rate: 0.001
   
   # 模型保存位置
-  checkpoint_dir: 'checkpoints/wind_power_ood'
-  notes: 'EDL Ensemble Binary for wind power npy data'
+  checkpoint_dir: 'checkpoints/OvR/old3'
+  notes: 'OvR for wind power npy data'
   
   # EDL 损失函数：可选 'mse', 'digamma', 'log'
   edl_loss_type: 'mse'
-  edl_annealing_step: 500
+  edl_annealing_step: 80
   
   device: 'cuda'
-  optimizer: 'Adam'
+  optimizer: 'SGD'
   momentum: 0.9
   weight_decay: 0.0001
   
@@ -50,3 +50,6 @@ train:
     scheduler_type: 'StepLR'
     step_size: 40
     gamma: 0.1
+  
+  # 集成策略: 'Normal_vs_Fault_i' (默认) 或 'One_vs_Rest'
+  ensemble_strategy: 'One_vs_Rest'

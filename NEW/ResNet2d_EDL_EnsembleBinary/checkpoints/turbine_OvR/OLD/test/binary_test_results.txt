@@ -1,5 +1,5 @@
-Uncertainty Threshold: 0.5
-Closed-set Accuracy (Ensemble): 98.80%
+Uncertainty Threshold: 0.25
+Closed-set Accuracy (Ensemble): 30.80%
 
 --- 各模型单独（二分类，仅已知类）---
 Model 0 (Normal vs All Faults): 99.90%
@@ -9,7 +9,7 @@ Model 3 (Normal vs Fault 3 [5二级后轴承磨损]): 99.25%
 Model 4 (Normal vs Fault 4 [6行星轴承滚珠磨损]): 50.00%
 Average Binary Accuracy: 89.18%
 
-F1 (OOD): 0.0000
+F1 (OOD): 0.3435
 AUROC: 0.6784
-FAR: 0.00%
-MAR: 100.00%
+FAR: 69.20%
+MAR: 7.50%

@@ -101,34 +101,47 @@ def main():
     weight_decay = float(train_config.get('weight_decay', 1e-4))
 
     train_start_time = datetime.now()
+    
+    # 从 config 中读取新策略
+    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
+    print(f"使用集成策略: {ensemble_strategy}")
+    
     save_experiment_info(config, checkpoint_dir, model=None, train_dataset=train_dataset, val_dataset=val_dataset, start_time=train_start_time)
 
     model_kw = {'num_classes': 2}
 
     for k in range(K):
         print(f"\n{'='*60}")
-        if k == 0:
-            print(f"训练二分类模型 k = 0 / {K-1}（正常 vs 所有故障）")
-        else:
-            print(f"训练二分类模型 k = {k} / {K-1}（正常 vs 第 {k} 类故障）")
-        print(f"{'='*60}")
-        
-        if k == 0:
+        if ensemble_strategy == 'One_vs_Rest':
+            print(f"训练 OvR 模型 k = {k} / {K-1}（类别 {k} vs Rest）")
             train_subset = train_dataset
             val_subset = val_dataset
-            train_pos = np.sum(train_dataset.y == 0)
+            train_pos = np.sum(train_dataset.y == k)
             train_neg = len(train_dataset) - train_pos
-            val_pos = np.sum(val_dataset.y == 0)
+            val_pos = np.sum(val_dataset.y == k)
             val_neg = len(val_dataset) - val_pos
-        else:
-            train_indices = np.where((train_dataset.y == 0) | (train_dataset.y == k))[0]
-            val_indices = np.where((val_dataset.y == 0) | (val_dataset.y == k))[0]
-            train_subset = Subset(train_dataset, train_indices)
-            val_subset = Subset(val_dataset, val_indices)
-            train_pos = np.sum(train_dataset.y[train_indices] == k)
-            train_neg = np.sum(train_dataset.y[train_indices] == 0)
-            val_pos = np.sum(val_dataset.y[val_indices] == k)
-            val_neg = np.sum(val_dataset.y[val_indices] == 0)
+        else:  # 默认为 'Normal_vs_Fault_i'
+            if k == 0:
+                print(f"训练二分类模型 k = 0 / {K-1}（正常 vs 所有故障）")
+            else:
+                print(f"训练二分类模型 k = {k} / {K-1}（正常 vs 第 {k} 类故障）")
+            
+            if k == 0:
+                train_subset = train_dataset
+                val_subset = val_dataset
+                train_pos = np.sum(train_dataset.y == 0)
+                train_neg = len(train_dataset) - train_pos
+                val_pos = np.sum(val_dataset.y == 0)
+                val_neg = len(val_dataset) - val_pos
+            else:
+                train_indices = np.where((train_dataset.y == 0) | (train_dataset.y == k))[0]
+                val_indices = np.where((val_dataset.y == 0) | (val_dataset.y == k))[0]
+                train_subset = Subset(train_dataset, train_indices)
+                val_subset = Subset(val_dataset, val_indices)
+                train_pos = np.sum(train_dataset.y[train_indices] == k)
+                train_neg = np.sum(train_dataset.y[train_indices] == 0)
+                val_pos = np.sum(val_dataset.y[val_indices] == k)
+                val_neg = np.sum(val_dataset.y[val_indices] == 0)
             
         train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
@@ -161,11 +174,14 @@ def main():
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
                 
-                # 二分类标签
-                if k == 0:
-                    binary_labels = (labels == 0).long() # 1 表示正常(0)，0 表示故障(>0)
-                else:
-                    binary_labels = (labels == k).long() # 1 表示故障(k)，0 表示正常(0)
+                # 根据策略动态生成二分类标签
+                if ensemble_strategy == 'One_vs_Rest':
+                    binary_labels = (labels == k).long()  # 1 表示类别 k，0 表示 Rest
+                else: # 'Normal_vs_Fault_i'
+                    if k == 0:
+                        binary_labels = (labels == 0).long() # 1 表示正常(0)，0 表示故障(>0)
+                    else:
+                        binary_labels = (labels == k).long() # 1 表示故障(k)，0 表示正常(0)
                 optimizer.zero_grad()
                 out = model(inputs)
                 logits = out[0] if isinstance(out, tuple) else out
@@ -202,10 +218,13 @@ def main():
                 for inputs, labels in val_loader:
                     inputs, labels = inputs.to(device), labels.to(device)
                     
-                    if k == 0:
-                        binary_labels = (labels == 0).long()
-                    else:
+                    if ensemble_strategy == 'One_vs_Rest':
                         binary_labels = (labels == k).long()
+                    else: # 'Normal_vs_Fault_i'
+                        if k == 0:
+                            binary_labels = (labels == 0).long()
+                        else:
+                            binary_labels = (labels == k).long()
                     out = model(inputs)
                     logits = out[0] if isinstance(out, tuple) else out
                     
@@ -252,10 +271,13 @@ def main():
         print(f"模型 k={k} 已保存: {path_k}, best_val_acc={best_val_acc:.2f}%")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-        if k == 0:
-            fig.suptitle(f'Model k=0 (Normal vs All Faults)')
-        else:
-            fig.suptitle(f'Model k={k} (Normal vs Fault {k})')
+        if ensemble_strategy == 'One_vs_Rest':
+            fig.suptitle(f'Model k={k} (Class {k} vs Rest)')
+        else: # 'Normal_vs_Fault_i'
+            if k == 0:
+                fig.suptitle(f'Model k=0 (Normal vs All Faults)')
+            else:
+                fig.suptitle(f'Model k={k} (Normal vs Fault {k})')
         ax1.plot(history['train_loss'], label='Train')
         ax1.plot(history['val_loss'], label='Val')
         ax1.set_xlabel('Epoch')

@@ -36,23 +36,46 @@ def get_dataset(data_config, split='test', filter_classes=None):
         unknown_classes=unknown_classes
     )
 
-def compute_uncertainty_threshold_iqr(val_loader, models, device, K):
+def compute_uncertainty_threshold_iqr(val_loader, models, device, K, agg='mean', mode='edl'):
     for m in models:
         m.eval()
     uncertainties_list = []
     with torch.no_grad():
         for inputs, _ in val_loader:
             inputs = inputs.to(device)
-            u_batch = []
-            for k in range(K):
-                logits_k = models[k](inputs)
-                evidence_k = relu_evidence(logits_k)
-                alpha_k = evidence_k + 1
-                S_k = torch.sum(alpha_k, dim=1)
-                u_k = (2.0 / S_k).cpu().numpy()
-                u_batch.append(u_k)
-            u_mean = np.mean(np.stack(u_batch, axis=0), axis=0)
-            uncertainties_list.append(u_mean)
+            if mode == 'max_prob':
+                p_yes_list = []
+                for k in range(K):
+                    logits_k = models[k](inputs)
+                    evidence_k = relu_evidence(logits_k)
+                    alpha_k = evidence_k + 1
+                    S_k = torch.sum(alpha_k, dim=1)
+                    probs_k = alpha_k / S_k.unsqueeze(1)
+                    p_yes_list.append(probs_k[:, 1])
+                max_p_yes = torch.stack(p_yes_list, dim=1).max(dim=1)[0]
+                u_batch = (1.0 - max_p_yes).cpu().numpy()
+            elif agg == 'positive_only':
+                alpha_pos_list = []
+                for k in range(K):
+                    logits_k = models[k](inputs)
+                    evidence_k = relu_evidence(logits_k)
+                    alpha_k = evidence_k + 1
+                    alpha_pos_list.append(alpha_k[:, 1])
+                alpha_pos_all = torch.stack(alpha_pos_list, dim=1)
+                S_pos = alpha_pos_all.sum(dim=1).clamp(min=1e-6)
+                u_batch = (K / S_pos).cpu().numpy()
+            else:
+                u_batch = []
+                for k in range(K):
+                    logits_k = models[k](inputs)
+                    evidence_k = relu_evidence(logits_k)
+                    alpha_k = evidence_k + 1
+                    S_k = torch.sum(alpha_k, dim=1)
+                    u_k = (2.0 / S_k).cpu().numpy()
+                    u_batch.append(u_k)
+                u_mean = np.mean(np.stack(u_batch, axis=0), axis=0)
+                u_batch = u_mean
+            uncertainties_list.append(u_batch)
     all_u = np.concatenate(uncertainties_list)
     q1, q3 = np.percentile(all_u, [25, 75])
     iqr = q3 - q1
@@ -73,19 +96,23 @@ def main():
                         help='若指定，则从验证集不确定性 IQR 自动计算阈值，忽略 --uncertainty_threshold')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='结果输出目录；未指定则为 checkpoint_dir/test')
-    parser.add_argument('--agg', type=str, default='dynamic', choices=['dynamic', 'mean'],
-                        help='不确定度聚合方式：dynamic=按预测类别动态选择，mean=所有模型均值')
+    parser.add_argument('--agg', type=str, default='mean', choices=['dynamic', 'mean', 'positive_only'],
+                        help='不确定度聚合方式（仅 mode=edl 时生效）：dynamic/mean/positive_only')
     parser.add_argument('--mode', type=str, default='edl', choices=['edl', 'max_prob'],
-                        help="不确定性: 'edl' (u_k=2/S_k 聚合) 或 'max_prob' (1 - max P_yes)")
+                        help="OOD 分数：edl=用 u 聚合，max_prob=用 1 - max(P_yes) 做 OOD 分数")
     args = parser.parse_args()
 
     config = load_config(args.config)
     data_config = config['data'] 
     model_config = config['model']
     train_config = config['train']
+    
+    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
+    print(f"使用集成策略进行测试: {ensemble_strategy}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
+    print(f"OOD 分数模式: {args.mode}" + (f", 聚合: {args.agg}" if args.mode == 'edl' else ""))
 
     if args.checkpoint:
         checkpoint_dir = os.path.abspath(args.checkpoint)
@@ -130,11 +157,12 @@ def main():
         # 使用已知类的测试数据作为 val，用于定阈值
         val_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
         val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-        uncertainty_threshold = compute_uncertainty_threshold_iqr(val_loader, models, device, K)
+        uncertainty_threshold = compute_uncertainty_threshold_iqr(val_loader, models, device, K, agg=args.agg, mode=args.mode)
         print(f"由已知类测试子集 IQR 得到不确定性阈值: {uncertainty_threshold:.4f}")
     else:
         uncertainty_threshold = args.uncertainty_threshold
-        print(f"不确定性阈值 (u > 此值判 OOD): {uncertainty_threshold}")
+        label = "OOD 分数 (1 - max P_yes)" if args.mode == 'max_prob' else "不确定性 u"
+        print(f"阈值 ({label} > 此值判 OOD): {uncertainty_threshold}")
 
     all_labels = []
     all_preds = []
@@ -148,6 +176,7 @@ def main():
             inputs = inputs.to(device)
             p_yes_list = []
             u_k_list = []
+            alpha_pos_list = []
             for k in range(K):
                 logits_k = models[k](inputs)
                 evidence_k = relu_evidence(logits_k)
@@ -156,25 +185,33 @@ def main():
                 probs_k = alpha_k / S_k.unsqueeze(1)
                 p_yes_list.append(probs_k[:, 1])
                 u_k_list.append(2.0 / S_k)
+                alpha_pos_list.append(alpha_k[:, 1])
                     
-            # 概率重构
-            p_normal = p_yes_list[0] # 模型0的正类概率是正常概率
-            p_fault_total = 1.0 - p_normal
-            
-            final_probs_list = [p_normal]
-            for k in range(1, K):
-                # 模型k的输出是在故障前提下，属于故障k的概率
-                # 最终概率 = 总故障概率 * 模型k的概率
-                p_k_final = p_fault_total * p_yes_list[k]
-                final_probs_list.append(p_k_final)
+            if ensemble_strategy == 'One_vs_Rest':
+                final_probs = torch.stack(p_yes_list, dim=1)
+            else: # 'Normal_vs_Fault_i'
+                # 概率重构
+                p_normal = p_yes_list[0] # 模型0的正类概率是正常概率
+                p_fault_total = 1.0 - p_normal
                 
-            final_probs = torch.stack(final_probs_list, dim=1)
+                final_probs_list = [p_normal]
+                for k in range(1, K):
+                    # 模型k的输出是在故障前提下，属于故障k的概率
+                    # 最终概率 = 总故障概率 * 模型k的概率
+                    p_k_final = p_fault_total * p_yes_list[k]
+                    final_probs_list.append(p_k_final)
+                    
+                final_probs = torch.stack(final_probs_list, dim=1)
             
             # 记录二分类预测结果用于单独评估
             binary_preds = []
-            binary_preds.append((p_yes_list[0] > 0.5).cpu().numpy().astype(np.int32))
-            for k in range(1, K):
-                binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
+            if ensemble_strategy == 'One_vs_Rest':
+                for k in range(K):
+                    binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
+            else: # 'Normal_vs_Fault_i'
+                binary_preds.append((p_yes_list[0] > 0.5).cpu().numpy().astype(np.int32))
+                for k in range(1, K):
+                    binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
             binary_preds_list.append(np.stack(binary_preds, axis=1))
             
             preds_local = final_probs.argmax(dim=1).cpu().numpy()
@@ -185,16 +222,23 @@ def main():
                     closed_set_true.append(int(labels[i]))
                     closed_set_pred.append(int(preds_local[i]))
             
-            u_k_stack = torch.stack(u_k_list, dim=1)
-            if args.agg == 'mean':
-                uncertainty = u_k_stack.mean(dim=1).cpu().numpy()
-            elif args.agg == 'dynamic':
-                # 动态选择：如果预测为正常(0)，取 u_0
-                # 如果预测为故障k(k>0)，取 u_k
-                winner = final_probs.argmax(dim=1)
-                uncertainty = u_k_stack[torch.arange(u_k_stack.size(0), device=u_k_stack.device), winner].cpu().numpy()
+            if args.mode == 'max_prob':
+                # OOD 分数 = 1 - max(P_yes)：无人高置信时分数高，利于判 OOD
+                max_p_yes = torch.stack(p_yes_list, dim=1).max(dim=1)[0]
+                uncertainty = (1.0 - max_p_yes).cpu().numpy()
             else:
-                uncertainty = u_k_stack.mean(dim=1).cpu().numpy() # fallback
+                u_k_stack = torch.stack(u_k_list, dim=1)
+                if args.agg == 'mean':
+                    uncertainty = u_k_stack.mean(dim=1).cpu().numpy()
+                elif args.agg == 'dynamic':
+                    winner = final_probs.argmax(dim=1)
+                    uncertainty = u_k_stack[torch.arange(u_k_stack.size(0), device=u_k_stack.device), winner].cpu().numpy()
+                elif args.agg == 'positive_only':
+                    alpha_pos_all = torch.stack(alpha_pos_list, dim=1)
+                    S_pos = alpha_pos_all.sum(dim=1).clamp(min=1e-6)
+                    uncertainty = (K / S_pos).cpu().numpy()
+                else:
+                    uncertainty = u_k_stack.mean(dim=1).cpu().numpy()
 
             for i in range(len(labels)):
                 u_val = float(uncertainty[i])
@@ -235,43 +279,49 @@ def main():
     known_idx = np.where(known_mask)[0]
     binary_accuracies = []
     binary_conf_info = []
-    
-    # 模型 0 的评估 (正常 vs 所有故障)
-    true_0 = (all_labels[known_idx] == 0).astype(np.int32)
-    pred_0 = binary_preds_matrix[known_idx, 0]
-    acc_0 = accuracy_score(true_0, pred_0)
-    binary_accuracies.append(acc_0)
-    title_0 = "Model 0 (Normal vs All Faults)"
-    binary_conf_info.append({
-        'model_idx': 0,
-        'true': true_0,
-        'pred': pred_0,
-        'title': title_0
-    })
-    print(f"  {title_0}: 二分类准确率 = {acc_0 * 100:.2f}%")
-    
-    # 模型 k 的评估 (正常 vs 故障 k)
-    for k in range(1, K):
-        # 仅选取类别为 0 或 k 的样本进行评估
-        mask_k = (all_labels[known_idx] == 0) | (all_labels[known_idx] == k)
-        idx_k = known_idx[mask_k]
-        
-        if len(idx_k) > 0:
-            true_k = (all_labels[idx_k] == k).astype(np.int32)
-            pred_k = binary_preds_matrix[idx_k, k]
+
+    if ensemble_strategy == 'One_vs_Rest':
+        for k in range(K):
+            true_k = (all_labels[known_idx] == k).astype(np.int32)
+            pred_k = binary_preds_matrix[known_idx, k]
             acc_k = accuracy_score(true_k, pred_k)
             binary_accuracies.append(acc_k)
-            title_k = f"Model {k} (Normal vs Fault {k} [{known_classes[k]}])"
+            title_k = f"Model {k} (Class {k} [{known_classes[k]}] vs Rest)"
             binary_conf_info.append({
-                'model_idx': k,
-                'true': true_k,
-                'pred': pred_k,
-                'title': title_k
+                'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k
             })
             print(f"  {title_k}: 二分类准确率 = {acc_k * 100:.2f}%")
-        else:
-            binary_accuracies.append(0.0)
-            print(f"  Model {k}: 无评估样本")
+    else: # 'Normal_vs_Fault_i'
+        # 模型 0 的评估 (正常 vs 所有故障)
+        true_0 = (all_labels[known_idx] == 0).astype(np.int32)
+        pred_0 = binary_preds_matrix[known_idx, 0]
+        acc_0 = accuracy_score(true_0, pred_0)
+        binary_accuracies.append(acc_0)
+        title_0 = "Model 0 (Normal vs All Faults)"
+        binary_conf_info.append({
+            'model_idx': 0, 'true': true_0, 'pred': pred_0, 'title': title_0
+        })
+        print(f"  {title_0}: 二分类准确率 = {acc_0 * 100:.2f}%")
+        
+        # 模型 k 的评估 (正常 vs 故障 k)
+        for k in range(1, K):
+            # 仅选取类别为 0 或 k 的样本进行评估
+            mask_k = (all_labels[known_idx] == 0) | (all_labels[known_idx] == k)
+            idx_k = known_idx[mask_k]
+            
+            if len(idx_k) > 0:
+                true_k = (all_labels[idx_k] == k).astype(np.int32)
+                pred_k = binary_preds_matrix[idx_k, k]
+                acc_k = accuracy_score(true_k, pred_k)
+                binary_accuracies.append(acc_k)
+                title_k = f"Model {k} (Normal vs Fault {k} [{known_classes[k]}])"
+                binary_conf_info.append({
+                    'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k
+                })
+                print(f"  {title_k}: 二分类准确率 = {acc_k * 100:.2f}%")
+            else:
+                binary_accuracies.append(0.0)
+                print(f"  Model {k}: 无评估样本")
             
     print(f"  平均二分类准确率: {np.mean(binary_accuracies) * 100:.2f}%")
 
@@ -371,10 +421,12 @@ def main():
         plt.figure(figsize=(8, 6))
         plt.hist(id_unc, bins=30, alpha=0.6, label='ID', density=True)
         plt.hist(ood_unc, bins=30, alpha=0.6, label='OOD', density=True)
-        plt.xlabel('Uncertainty')
+        plt.xlabel('Uncertainty' if args.mode == 'edl' else 'OOD score (1 - max P_yes)')
         plt.ylabel('Density')
         plt.xlim(0.0, 1.0)
-        plt.title(f'Uncertainty Distribution (AUROC={auroc:.4f})')
+        plt.xticks(np.arange(0, 1.05, 0.05))
+        title_suffix = ' (1 - max P_yes)' if args.mode == 'max_prob' else ''
+        plt.title(f'Uncertainty Distribution{title_suffix} (AUROC={auroc:.4f})')
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.5)
         plt.tight_layout()

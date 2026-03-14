@@ -1,0 +1,60 @@
+# =========================================================
+# ResNet2d EDL Ensemble Binary (支持 npy 打包数据集)
+#
+# 试验台数据集（数据打包）：coefAll.mat -> 64×64 时频图，经分割生成 npy
+# 使用 Normal-vs-Fault_i 集成策略（正常 vs 故障 i）
+# =========================================================
+
+data:
+  # 数据集目录，需先在 ../Kong_code&&data/数据打包 下运行 分割数据集.py
+  # 会在子目录 "2"（随机种子 seed=2）下生成：
+  #   X_train.npy, y_train.npy, X_test.npy, y_test.npy
+  data_dir: '../Kong_code&&data/数据打包/2'
+  
+  openset:
+    # 已知类（与 edl代码 CNNMamba/test.py 一致的 ID 类）
+    # ID: 1~6, 8；OOD: 7, 9
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+      
+    # 未知类（OOD）：与旧 edl 代码中一致，7 + 9
+    unknown_classes:
+      - '7齿轮断齿'
+      - '9齿轮缺齿'
+
+model:
+  type: 'ResNet18_2d'
+
+train:
+  num_epochs: 80
+  batch_size: 256
+  learning_rate: 0.001
+  
+  # 模型保存位置（试验台 NvF）
+  checkpoint_dir: 'checkpoints/bench_NvF/seed2'
+  notes: 'NvF for bench test-rig npy data (seed=2)'
+  
+  # EDL 损失函数：可选 'mse', 'digamma', 'log'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 80
+  
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0005
+  
+  scheduler:
+    use_scheduler: true
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
+  
+  # 集成策略: 'Normal_vs_Fault_i' 或 'One_vs_Rest'
+  ensemble_strategy: 'Normal_vs_Fault_i'
+

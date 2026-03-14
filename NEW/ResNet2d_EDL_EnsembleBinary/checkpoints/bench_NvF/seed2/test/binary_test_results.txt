@@ -1,0 +1,17 @@
+Uncertainty Threshold: 0.5
+Closed-set Accuracy (Ensemble): 61.21%
+
+--- 各模型单独（二分类，仅已知类）---
+Model 0 (Normal vs All Faults): 100.00%
+Model 1 (Normal vs Fault 1 [2轴承内圈]): 100.00%
+Model 2 (Normal vs Fault 2 [3轴承外圈]): 100.00%
+Model 3 (Normal vs Fault 3 [4轴承滚子]): 100.00%
+Model 4 (Normal vs Fault 4 [5轴承组合]): 100.00%
+Model 5 (Normal vs Fault 5 [6齿根裂纹]): 100.00%
+Model 6 (Normal vs Fault 6 [8齿轮点蚀]): 100.00%
+Average Binary Accuracy: 100.00%
+
+F1 (OOD): 0.0000
+AUROC: 0.5186
+FAR: 0.00%
+MAR: 100.00%

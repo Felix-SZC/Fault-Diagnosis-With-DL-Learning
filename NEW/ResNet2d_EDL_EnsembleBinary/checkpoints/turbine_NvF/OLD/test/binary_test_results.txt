@@ -10,6 +10,6 @@ Model 4 (Normal vs Fault 4 [6行星轴承滚珠磨损]): 100.00%
 Average Binary Accuracy: 99.95%
 
 F1 (OOD): 0.0000
-AUROC: 0.7422
+AUROC: 0.5873
 FAR: 0.00%
 MAR: 100.00%
