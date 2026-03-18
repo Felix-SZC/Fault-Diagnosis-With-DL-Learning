@@ -32,28 +32,30 @@ model:
   type: 'ResNet18_2d'
 
 train:
-  num_epochs: 80
-  batch_size: 256
-  learning_rate: 0.001
+  num_epochs: 200
+  batch_size: 32
+  learning_rate: 0.00005
   
   # 模型保存位置（试验台 OvR）
-  checkpoint_dir: 'checkpoints/bench_OvR/seed2'
+  checkpoint_dir: 'checkpoints/ResNet18/bench_OvR/seed2'
+  save_every_epoch: true
   notes: 'OvR for bench test-rig npy data (seed=2)'
   
   # EDL 损失函数：可选 'mse', 'digamma', 'log'
   edl_loss_type: 'mse'
-  edl_annealing_step: 80
+  edl_annealing_step: 200
+  kl_weight: 1.0
   
   device: 'cuda'
-  optimizer: 'Adam'
+  optimizer: 'SGD'
   momentum: 0.9
   weight_decay: 0.0005
   
   scheduler:
-    use_scheduler: true
+    use_scheduler: False
     scheduler_type: 'StepLR'
-    step_size: 40
-    gamma: 0.1
+    step_size: 10000
+    gamma: 1
   
   # 集成策略: 'Normal_vs_Fault_i' 或 'One_vs_Rest'
   ensemble_strategy: 'One_vs_Rest'

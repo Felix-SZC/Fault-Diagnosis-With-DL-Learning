@@ -33,12 +33,14 @@ train:
   learning_rate: 0.001
   
   # 模型保存位置
-  checkpoint_dir: 'checkpoints/OvR/old3'
+  checkpoint_dir: 'checkpoints/ResNet18/OvR/old3'
+  save_every_epoch: true
   notes: 'OvR for wind power npy data'
   
   # EDL 损失函数：可选 'mse', 'digamma', 'log'
   edl_loss_type: 'mse'
   edl_annealing_step: 80
+  kl_weight: 1.0
   
   device: 'cuda'
   optimizer: 'SGD'

@@ -155,7 +155,7 @@ def loglikelihood_loss(y, alpha, device=None):
     return loglikelihood
 
 
-def mse_loss(y, alpha, epoch_num, num_classes, annealing_step, device=None):
+def mse_loss(y, alpha, epoch_num, num_classes, annealing_step, device=None, kl_weight=1.0):
     """
     MSE型损失函数（包含KL正则化）
     对应论文中的 Eq.5 + KL正则项
@@ -167,6 +167,7 @@ def mse_loss(y, alpha, epoch_num, num_classes, annealing_step, device=None):
         num_classes: 类别总数
         annealing_step: KL退火步数（通常为10）
         device: 计算设备
+        kl_weight: KL散度正则项权重，>1 可增强防过拟合效果
     
     Returns:
         torch.Tensor: 总损失 = 数据拟合项 + KL正则项
@@ -198,14 +199,14 @@ def mse_loss(y, alpha, epoch_num, num_classes, annealing_step, device=None):
     # 对于非真实类别：kl_alpha = alpha（惩罚过度证据）
     kl_alpha = (alpha - 1) * (1 - y) + 1
     
-    # KL正则项
-    kl_div = annealing_coef * kl_divergence(kl_alpha, num_classes, device=device)
+    # KL正则项（可配置权重）
+    kl_div = annealing_coef * float(kl_weight) * kl_divergence(kl_alpha, num_classes, device=device)
     
     # 总损失 = 数据拟合项 + KL正则项
     return loglikelihood + kl_div
 
 
-def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None):
+def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None, kl_weight=1.0):
     """
     通用的EDL损失函数
     可以用于实现Eq.3（log）和Eq.4（digamma）
@@ -218,6 +219,7 @@ def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None
         num_classes: 类别总数
         annealing_step: KL退火步数
         device: 计算设备
+        kl_weight: KL散度正则项权重
     
     Returns:
         torch.Tensor: 总损失 = 数据拟合项 + KL正则项
@@ -247,14 +249,14 @@ def edl_loss(func, y, alpha, epoch_num, num_classes, annealing_step, device=None
     # 只对非真实类别进行KL正则化
     kl_alpha = (alpha - 1) * (1 - y) + 1
     
-    # KL正则项
-    kl_div = annealing_coef * kl_divergence(kl_alpha, num_classes, device=device)
+    # KL正则项（可配置权重）
+    kl_div = annealing_coef * float(kl_weight) * kl_divergence(kl_alpha, num_classes, device=device)
     
     # 总损失 = 数据拟合项 + KL正则项
     return A + kl_div
 
 
-def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
+def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None, kl_weight=1.0):
     """
     EDL MSE损失函数（完整版本）
     对应论文中的 Eq.5
@@ -267,6 +269,7 @@ def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=
         annealing_step: KL退火步数（通常为10）
         device: 计算设备
         sample_weight: 可选，形状 [batch_size]，用于类别不平衡时对正类样本加权
+        kl_weight: KL散度正则项权重
     
     Returns:
         torch.Tensor: 平均损失值（标量）
@@ -282,7 +285,7 @@ def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=
     evidence = relu_evidence(output)
     alpha = evidence + 1
     
-    per_sample = mse_loss(target, alpha, epoch_num, num_classes, annealing_step, device=device)
+    per_sample = mse_loss(target, alpha, epoch_num, num_classes, annealing_step, device=device, kl_weight=kl_weight)
     if sample_weight is not None:
         sample_weight = sample_weight.to(device).float().view(-1, 1)
         loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)
@@ -291,13 +294,13 @@ def edl_mse_loss(output, target, epoch_num, num_classes, annealing_step, device=
     return loss
 
 
-def edl_log_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
-    """EDL Log损失；sample_weight 可选，用于类别不平衡时对正类加权。"""
+def edl_log_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None, kl_weight=1.0):
+    """EDL Log损失；sample_weight 可选，用于类别不平衡时对正类加权；kl_weight 为 KL 正则权重。"""
     if not device:
         device = get_device()
     evidence = relu_evidence(output)
     alpha = evidence + 1
-    per_sample = edl_loss(torch.log, target, alpha, epoch_num, num_classes, annealing_step, device)
+    per_sample = edl_loss(torch.log, target, alpha, epoch_num, num_classes, annealing_step, device, kl_weight=kl_weight)
     if sample_weight is not None:
         sample_weight = sample_weight.to(device).float().view(-1, 1)
         loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)
@@ -306,13 +309,13 @@ def edl_log_loss(output, target, epoch_num, num_classes, annealing_step, device=
     return loss
 
 
-def edl_digamma_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None):
-    """EDL Digamma损失；sample_weight 可选，用于类别不平衡时对正类加权。"""
+def edl_digamma_loss(output, target, epoch_num, num_classes, annealing_step, device=None, sample_weight=None, kl_weight=1.0):
+    """EDL Digamma损失；sample_weight 可选，用于类别不平衡时对正类加权；kl_weight 为 KL 正则权重。"""
     if not device:
         device = get_device()
     evidence = relu_evidence(output)
     alpha = evidence + 1
-    per_sample = edl_loss(torch.digamma, target, alpha, epoch_num, num_classes, annealing_step, device)
+    per_sample = edl_loss(torch.digamma, target, alpha, epoch_num, num_classes, annealing_step, device, kl_weight=kl_weight)
     if sample_weight is not None:
         sample_weight = sample_weight.to(device).float().view(-1, 1)
         loss = (sample_weight * per_sample).sum() / sample_weight.sum().clamp(min=1e-8)

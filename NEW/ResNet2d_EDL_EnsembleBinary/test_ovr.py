@@ -134,7 +134,7 @@ def load_models(checkpoint_dir, K, backbone_type, device, epoch=None):
     return models
 
 
-def run_test_loop(models, test_loader, device, K, ensemble_strategy, agg, mode, uncertainty_threshold):
+def run_test_loop(models, test_loader, device, K, agg, mode, uncertainty_threshold):
     """跑一遍测试循环，返回 all_labels, all_preds, all_uncertainties, binary_preds_matrix, closed_set_true, closed_set_pred（均为 numpy）。"""
     all_labels = []
     all_preds = []
@@ -159,25 +159,12 @@ def run_test_loop(models, test_loader, device, K, ensemble_strategy, agg, mode, 
                 u_k_list.append(2.0 / S_k)
                 alpha_pos_list.append(alpha_k[:, 1])
 
-            if ensemble_strategy == 'One_vs_Rest':
-                final_probs = torch.stack(p_yes_list, dim=1)
-            else:
-                p_normal = p_yes_list[0]
-                p_fault_total = 1.0 - p_normal
-                final_probs_list = [p_normal]
-                for k in range(1, K):
-                    p_k_final = p_fault_total * p_yes_list[k]
-                    final_probs_list.append(p_k_final)
-                final_probs = torch.stack(final_probs_list, dim=1)
+            final_probs = torch.stack(p_yes_list, dim=1)
 
+            # 每个子模型各自的二分类预测（P_yes > 0.5 视为“正类”）
             binary_preds = []
-            if ensemble_strategy == 'One_vs_Rest':
-                for k in range(K):
-                    binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
-            else:
-                binary_preds.append((p_yes_list[0] > 0.5).cpu().numpy().astype(np.int32))
-                for k in range(1, K):
-                    binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
+            for k in range(K):
+                binary_preds.append((p_yes_list[k] > 0.5).cpu().numpy().astype(np.int32))
             binary_preds_list.append(np.stack(binary_preds, axis=1))
 
             preds_local = final_probs.argmax(dim=1).cpu().numpy()
@@ -185,6 +172,21 @@ def run_test_loop(models, test_loader, device, K, ensemble_strategy, agg, mode, 
                 if int(labels[i]) < K:
                     closed_set_true.append(int(labels[i]))
                     closed_set_pred.append(int(preds_local[i]))
+
+            # 纯概率判 OOD：若所有子模型都判为负类(Rest)，则认为是 OOD
+            if mode == 'all_rest':
+                p_yes_stack = torch.stack(p_yes_list, dim=1)
+                all_rest_mask = (p_yes_stack <= 0.5).all(dim=1)
+                for i in range(len(labels)):
+                    u_val = 0.0
+                    all_uncertainties.append(u_val)
+                    if bool(all_rest_mask[i]):
+                        all_preds.append(-1)
+                    else:
+                        pl = int(preds_local[i])
+                        all_preds.append(pl if pl < K else -1)
+                all_labels.extend(labels.cpu().numpy().tolist())
+                continue
 
             if mode == 'max_prob':
                 max_p_yes = torch.stack(p_yes_list, dim=1).max(dim=1)[0]
@@ -201,12 +203,8 @@ def run_test_loop(models, test_loader, device, K, ensemble_strategy, agg, mode, 
                     uncertainty = u_k_stack.mean(dim=1).cpu().numpy()
                 elif agg == 'dynamic':
                     winner = final_probs.argmax(dim=1)
-                    # 将所有模型的正类 alpha 堆叠起来
                     alpha_pos_stack = torch.stack(alpha_pos_list, dim=1)
-                    # 取出胜出模型对应的正类 alpha
                     winner_alpha_pos = alpha_pos_stack[torch.arange(alpha_pos_stack.size(0), device=alpha_pos_stack.device), winner]
-                    # 仅使用正类计算不确定度：假设负类 evidence=0 (即 alpha_neg=1)
-                    # S = winner_alpha_pos + 1.0, u = 2.0 / S
                     uncertainty = (2.0 / (winner_alpha_pos + 1.0)).cpu().numpy()
                 elif agg == 'positive_only':
                     alpha_pos_all = torch.stack(alpha_pos_list, dim=1)
@@ -235,7 +233,7 @@ def run_test_loop(models, test_loader, device, K, ensemble_strategy, agg, mode, 
 
 
 def main():
-    parser = argparse.ArgumentParser(description='EDL 集成二分类：测试 K 个模型，EDL 不确定度，OOD 指标')
+    parser = argparse.ArgumentParser(description='EDL 集成二分类 (OvR)：测试 K 个模型，EDL 不确定度，OOD 指标')
     parser.add_argument(
         '--config',
         type=str,
@@ -253,8 +251,9 @@ def main():
                         help='结果输出目录；未指定则为 checkpoint_dir/test')
     parser.add_argument('--agg', type=str, default='mean', choices=['dynamic', 'mean', 'positive_only'],
                         help='不确定度聚合方式（仅 mode=edl 时生效）：dynamic/mean/positive_only')
-    parser.add_argument('--mode', type=str, default='edl', choices=['edl', 'max_prob', 'entropy'],
-                        help="OOD 分数：edl=用 u 聚合，max_prob=用 1 - max(P_yes)，entropy=用 P_yes 归一化熵")
+    parser.add_argument('--mode', type=str, default='edl',
+                        choices=['edl', 'max_prob', 'entropy', 'all_rest'],
+                        help="OOD 分数：edl=用 u 聚合，max_prob=用 1 - max(P_yes)，entropy=用 P_yes 归一化熵，all_rest=若所有子模型都判为 Rest 则视为 OOD（仅用概率）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -262,8 +261,9 @@ def main():
     model_config = config['model']
     train_config = config['train']
     
-    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
-    print(f"使用集成策略进行测试: {ensemble_strategy}")
+    ensemble_strategy = train_config.get('ensemble_strategy', 'One_vs_Rest')
+    if ensemble_strategy != 'One_vs_Rest':
+        print(f"警告：配置文件中的策略为 {ensemble_strategy}，但本脚本(test_ovr.py)专用于 One_vs_Rest。将按 One_vs_Rest 逻辑执行。")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
@@ -311,7 +311,7 @@ def main():
         for e in epochs:
             models_e = load_models(checkpoint_dir, K, backbone_type, device, epoch=e)
             all_labels_e, all_preds_e, all_uncertainties_e, binary_preds_matrix_e, closed_set_true_e, closed_set_pred_e = run_test_loop(
-                models_e, test_loader, device, K, ensemble_strategy, args.agg, args.mode, uncertainty_threshold
+                models_e, test_loader, device, K, args.agg, args.mode, uncertainty_threshold
             )
             known_mask_e = all_labels_e < K
             mapped_known_e = all_labels_e[known_mask_e]
@@ -359,7 +359,7 @@ def main():
         print(f"阈值 ({label} > 此值判 OOD): {uncertainty_threshold}")
 
     all_labels, all_preds, all_uncertainties, binary_preds_matrix, closed_set_true, closed_set_pred = run_test_loop(
-        models, test_loader, device, K, ensemble_strategy, args.agg, args.mode, uncertainty_threshold
+        models, test_loader, device, K, args.agg, args.mode, uncertainty_threshold
     )
 
     # 已知类的掩码
@@ -382,48 +382,16 @@ def main():
     binary_accuracies = []
     binary_conf_info = []
 
-    if ensemble_strategy == 'One_vs_Rest':
-        for k in range(K):
-            true_k = (all_labels[known_idx] == k).astype(np.int32)
-            pred_k = binary_preds_matrix[known_idx, k]
-            acc_k = accuracy_score(true_k, pred_k)
-            binary_accuracies.append(acc_k)
-            title_k = f"Model {k} (Class {k} [{known_classes[k]}] vs Rest)"
-            binary_conf_info.append({
-                'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k
-            })
-            print(f"  {title_k}: 二分类准确率 = {acc_k * 100:.2f}%")
-    else: # 'Normal_vs_Fault_i'
-        # 模型 0 的评估 (正常 vs 所有故障)
-        true_0 = (all_labels[known_idx] == 0).astype(np.int32)
-        pred_0 = binary_preds_matrix[known_idx, 0]
-        acc_0 = accuracy_score(true_0, pred_0)
-        binary_accuracies.append(acc_0)
-        title_0 = "Model 0 (Normal vs All Faults)"
+    for k in range(K):
+        true_k = (all_labels[known_idx] == k).astype(np.int32)
+        pred_k = binary_preds_matrix[known_idx, k]
+        acc_k = accuracy_score(true_k, pred_k)
+        binary_accuracies.append(acc_k)
+        title_k = f"Model {k} (Class {k} [{known_classes[k]}] vs Rest)"
         binary_conf_info.append({
-            'model_idx': 0, 'true': true_0, 'pred': pred_0, 'title': title_0
+            'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k
         })
-        print(f"  {title_0}: 二分类准确率 = {acc_0 * 100:.2f}%")
-        
-        # 模型 k 的评估 (正常 vs 故障 k)
-        for k in range(1, K):
-            # 仅选取类别为 0 或 k 的样本进行评估
-            mask_k = (all_labels[known_idx] == 0) | (all_labels[known_idx] == k)
-            idx_k = known_idx[mask_k]
-            
-            if len(idx_k) > 0:
-                true_k = (all_labels[idx_k] == k).astype(np.int32)
-                pred_k = binary_preds_matrix[idx_k, k]
-                acc_k = accuracy_score(true_k, pred_k)
-                binary_accuracies.append(acc_k)
-                title_k = f"Model {k} (Normal vs Fault {k} [{known_classes[k]}])"
-                binary_conf_info.append({
-                    'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k
-                })
-                print(f"  {title_k}: 二分类准确率 = {acc_k * 100:.2f}%")
-            else:
-                binary_accuracies.append(0.0)
-                print(f"  Model {k}: 无评估样本")
+        print(f"  {title_k}: 二分类准确率 = {acc_k * 100:.2f}%")
             
     print(f"  平均二分类准确率: {np.mean(binary_accuracies) * 100:.2f}%")
 
@@ -599,9 +567,8 @@ def main():
         f.write(f"Uncertainty Threshold: {uncertainty_threshold}\n")
         f.write(f"Closed-set Accuracy (Ensemble): {test_results['accuracy']:.2f}%\n")
         f.write("\n--- 各模型单独（二分类，仅已知类）---\n")
-        f.write(f"Model 0 (Normal vs All Faults): {binary_accuracies[0] * 100:.2f}%\n")
-        for k in range(1, K):
-            f.write(f"Model {k} (Normal vs Fault {k} [{known_classes[k]}]): {binary_accuracies[k] * 100:.2f}%\n")
+        for k in range(K):
+            f.write(f"Model {k} (Class {k} [{known_classes[k]}] vs Rest): {binary_accuracies[k] * 100:.2f}%\n")
         f.write(f"Average Binary Accuracy: {np.mean(binary_accuracies) * 100:.2f}%\n")
         if test_results['has_unknown']:
             f.write(f"\nF1 (OOD): {test_results['f1_score']:.4f}\n")

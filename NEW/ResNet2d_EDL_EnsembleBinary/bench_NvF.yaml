@@ -37,12 +37,15 @@ train:
   learning_rate: 0.001
   
   # 模型保存位置（试验台 NvF）
-  checkpoint_dir: 'checkpoints/bench_NvF/seed2'
+  checkpoint_dir: 'checkpoints/ResNet18/bench_NvF/seed2'
+  # 是否每轮保存权重（True=模仿 Kong 每轮保存 model_k_epoch_*.pth，便于 --test_all_epochs 全测试）
+  save_every_epoch: true
   notes: 'NvF for bench test-rig npy data (seed=2)'
   
   # EDL 损失函数：可选 'mse', 'digamma', 'log'
   edl_loss_type: 'mse'
   edl_annealing_step: 80
+  kl_weight: 1.0
   
   device: 'cuda'
   optimizer: 'Adam'

@@ -1,0 +1,17 @@
+Uncertainty Threshold: 0.5
+Closed-set Accuracy (Ensemble): 99.79%
+
+--- 各模型单独（二分类，仅已知类）---
+Model 0 (Class 0 [1正常] vs Rest): 100.00%
+Model 1 (Class 1 [2轴承内圈] vs Rest): 100.00%
+Model 2 (Class 2 [3轴承外圈] vs Rest): 100.00%
+Model 3 (Class 3 [4轴承滚子] vs Rest): 100.00%
+Model 4 (Class 4 [5轴承组合] vs Rest): 100.00%
+Model 5 (Class 5 [6齿根裂纹] vs Rest): 99.64%
+Model 6 (Class 6 [8齿轮点蚀] vs Rest): 99.93%
+Average Binary Accuracy: 99.94%
+
+F1 (OOD): 0.4686
+AUROC: 0.5000
+FAR: 0.14%
+MAR: 69.25%
