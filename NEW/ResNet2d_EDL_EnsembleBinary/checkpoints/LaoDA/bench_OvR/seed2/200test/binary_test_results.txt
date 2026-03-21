@@ -1,0 +1,18 @@
+Closed-set Accuracy (Ensemble, edl_mean): 96.36%
+
+--- 各模型单独（二分类，仅已知类）---
+Model 0 (Class 0 [1正常] vs Rest): 99.64%
+Model 1 (Class 1 [2轴承内圈] vs Rest): 100.00%
+Model 2 (Class 2 [3轴承外圈] vs Rest): 98.86%
+Model 3 (Class 3 [4轴承滚子] vs Rest): 100.00%
+Model 4 (Class 4 [5轴承组合] vs Rest): 100.00%
+Model 5 (Class 5 [6齿根裂纹] vs Rest): 97.79%
+Model 6 (Class 6 [8齿轮点蚀] vs Rest): 99.79%
+Average Binary Accuracy: 99.44%
+
+--- OOD Metrics (per method) ---
+[mean] F1: 0.2973, AUROC: 0.7703, FAR: 2.93%, MAR: 80.75%
+[positive_only] F1: 0.5061, AUROC: 0.7810, FAR: 23.50%, MAR: 38.25%
+[dynamic] F1: 0.4738, AUROC: 0.7918, FAR: 8.93%, MAR: 59.25%
+[max_prob] F1: 0.4850, AUROC: 0.7917, FAR: 4.00%, MAR: 63.50%
+[all_rest] F1: 0.4769, AUROC: 0.6575, FAR: 2.00%, MAR: 66.50%

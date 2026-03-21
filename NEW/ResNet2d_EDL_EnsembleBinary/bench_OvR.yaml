@@ -32,6 +32,11 @@ model:
   type: 'ResNet18_2d'
 
 train:
+  # 训练哪些子模型:
+  # - 'all'      : 训练全部子模型
+  # - 2          : 只训练 model_2
+  # - [0, 2, 6]  : 训练指定多个子模型
+  model_indices: 2
   num_epochs: 200
   batch_size: 32
   learning_rate: 0.00005

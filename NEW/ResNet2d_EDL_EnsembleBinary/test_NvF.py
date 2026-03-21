@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, roc_curve, confusion_matrix
@@ -19,11 +20,12 @@ sys.path.append(current_dir)
 
 from common.utils.helpers import load_config
 from common.utils.data_loader import NpyPackDataset
+from common.utils.data_loader_1d import NpyPackDataset1D
 from common.edl_losses import relu_evidence
 from models import get_model
 
 
-def get_dataset(data_config, split='test', filter_classes=None):
+def get_dataset(data_config, model_type, split='test', filter_classes=None):
     data_dir = data_config.get('data_dir')
     if data_dir is None:
         raise ValueError("配置文件中必须指定 data.data_dir")
@@ -32,7 +34,8 @@ def get_dataset(data_config, split='test', filter_classes=None):
     known_classes = openset_config.get('known_classes')
     unknown_classes = openset_config.get('unknown_classes', [])
 
-    return NpyPackDataset(
+    dataset_cls = NpyPackDataset1D if model_type == 'LaoDA' else NpyPackDataset
+    return dataset_cls(
         data_dir=data_dir,
         split=split,
         filter_classes=filter_classes,
@@ -74,30 +77,100 @@ def load_models(checkpoint_dir, K, backbone_type, device, epoch=None):
     return models
 
 
-def compute_uncertainty_threshold_iqr(val_loader, models, device, K):
+def compute_uncertainty_threshold_iqr(
+    val_loader,
+    models,
+    device,
+    K,
+    fault_fusion='legacy',
+    fusion_tau=1.0,
+    ood_score_mode='mean_all',
+    ood_lambda=0.5,
+):
     for m in models:
         m.eval()
     uncertainties_list = []
     with torch.no_grad():
         for inputs, _ in val_loader:
             inputs = inputs.to(device)
-            u_batch = []
+            u_k_list = []
+            p_yes_list = []
             for k in range(K):
                 logits_k = models[k](inputs)
                 evidence_k = relu_evidence(logits_k)
                 alpha_k = evidence_k + 1
                 S_k = torch.sum(alpha_k, dim=1)
-                u_k = (2.0 / S_k).cpu().numpy()
-                u_batch.append(u_k)
-            u_mean = np.mean(np.stack(u_batch, axis=0), axis=0)
-            uncertainties_list.append(u_mean)
+                u_k = 2.0 / S_k
+                probs_k = alpha_k / S_k.unsqueeze(1)
+                p_yes_k = probs_k[:, 1]
+                u_k_list.append(u_k)
+                p_yes_list.append(p_yes_k)
+
+            u_k_stack = torch.stack(u_k_list, dim=1)  # [B, K]
+            _, winner_fault_idx = build_nvf_final_probs_and_winner(
+                p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
+            )
+            score = compute_batch_ood_score(
+                u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+            )
+            uncertainties_list.append(score.cpu().numpy())
     all_u = np.concatenate(uncertainties_list)
     q1, q3 = np.percentile(all_u, [25, 75])
     iqr = q3 - q1
     return float(q3 + 1.5 * iqr)
 
 
-def run_test_loop(models, test_loader, device, K, uncertainty_threshold):
+def build_nvf_final_probs_and_winner(p_yes_list, K, fault_fusion='legacy', fusion_tau=1.0):
+    """
+    根据 NvF 逻辑构造最终类别分数并返回故障winner索引（绝对类别索引）。
+    winner_fault_idx 仅在故障子模型(1..K-1)内竞争得到。
+    """
+    p_normal = p_yes_list[0]
+    p_fault_total = 1.0 - p_normal
+    fault_branch_scores = None
+
+    if K <= 1:
+        final_probs = p_normal.unsqueeze(1)
+        winner_fault_idx = torch.zeros_like(p_normal, dtype=torch.long)
+        return final_probs, winner_fault_idx
+
+    fault_q = torch.stack(p_yes_list[1:], dim=1)  # [B, K-1]
+    if fault_fusion == 'softmax':
+        tau = max(float(fusion_tau), 1e-6)
+        fault_w = F.softmax(fault_q / tau, dim=1)
+        fault_branch_scores = fault_w
+        fault_final = p_fault_total.unsqueeze(1) * fault_w
+    else:
+        fault_branch_scores = fault_q
+        fault_final = p_fault_total.unsqueeze(1) * fault_q
+
+    final_probs = torch.cat([p_normal.unsqueeze(1), fault_final], dim=1)
+    winner_fault_rel = fault_branch_scores.argmax(dim=1)
+    winner_fault_idx = winner_fault_rel + 1
+    return final_probs, winner_fault_idx
+
+
+def compute_batch_ood_score(u_k_stack, winner_fault_idx, ood_score_mode='mean_all', ood_lambda=0.5):
+    if ood_score_mode == 'key_models':
+        lam = float(ood_lambda)
+        lam = min(max(lam, 0.0), 1.0)
+        u0 = u_k_stack[:, 0]
+        u_winner = u_k_stack.gather(1, winner_fault_idx.view(-1, 1)).squeeze(1)
+        return lam * u0 + (1.0 - lam) * u_winner
+    return u_k_stack.mean(dim=1)
+
+
+def run_test_loop(
+    models,
+    test_loader,
+    device,
+    K,
+    uncertainty_threshold,
+    fault_fusion='legacy',
+    fusion_tau=1.0,
+    ood_score_mode='mean_all',
+    ood_lambda=0.5,
+):
     all_labels = []
     all_preds = []
     all_uncertainties = []
@@ -131,14 +204,9 @@ def run_test_loop(models, test_loader, device, K, uncertainty_threshold):
                 logits_pos_list.append(logits_k[:, 1])
                 logits_neg_list.append(logits_k[:, 0])
 
-            final_probs_list = []
-            p_normal = p_yes_list[0]
-            p_fault_total = 1.0 - p_normal
-            final_probs_list.append(p_normal)
-            for k in range(1, K):
-                p_k_final = p_fault_total * p_yes_list[k]
-                final_probs_list.append(p_k_final)
-            final_probs = torch.stack(final_probs_list, dim=1)
+            final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
+                p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
+            )
 
             binary_preds = []
             binary_preds.append((p_yes_list[0] > 0.5).cpu().numpy().astype(np.int32))
@@ -163,7 +231,9 @@ def run_test_loop(models, test_loader, device, K, uncertainty_threshold):
                     closed_set_true.append(int(labels[i]))
                     closed_set_pred.append(int(preds_local[i]))
 
-            uncertainty = u_k_stack.mean(dim=1).cpu().numpy()
+            uncertainty = compute_batch_ood_score(
+                u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+            ).cpu().numpy()
 
             for i in range(len(labels)):
                 u_val = float(uncertainty[i])
@@ -280,6 +350,10 @@ def main():
     parser.add_argument('--uncertainty_threshold', '--uncertainty', type=float, default=0.5, dest='uncertainty_threshold')
     parser.add_argument('--threshold_from_val', action='store_true')
     parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--fault_fusion', type=str, default=None, choices=['legacy', 'softmax'])
+    parser.add_argument('--fusion_tau', type=float, default=None)
+    parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models'])
+    parser.add_argument('--ood_lambda', type=float, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -293,6 +367,19 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
+
+    test_infer_cfg = train_config.get('test_infer', {})
+    fault_fusion = args.fault_fusion if args.fault_fusion is not None else test_infer_cfg.get('fault_fusion', 'legacy')
+    fusion_tau = args.fusion_tau if args.fusion_tau is not None else float(test_infer_cfg.get('fusion_tau', 1.0))
+    ood_score_mode = args.ood_score_mode if args.ood_score_mode is not None else test_infer_cfg.get('ood_score_mode', 'mean_all')
+    ood_lambda = args.ood_lambda if args.ood_lambda is not None else float(test_infer_cfg.get('ood_lambda', 0.5))
+    if fusion_tau <= 0:
+        raise ValueError("fusion_tau 必须 > 0")
+    ood_lambda = min(max(float(ood_lambda), 0.0), 1.0)
+    print(
+        f"测试策略: fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+        f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}"
+    )
 
     if args.checkpoint:
         checkpoint_dir = os.path.abspath(args.checkpoint)
@@ -309,7 +396,7 @@ def main():
 
     backbone_type = model_config.get('type', 'ResNet18_2d_Light')
 
-    test_dataset = get_dataset(data_config, split='test', filter_classes=None)
+    test_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=None)
     test_loader = DataLoader(test_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
     has_unknown_samples = any([v >= K for v in test_dataset.y])
     print(f"测试集大小: {len(test_dataset)}")
@@ -322,9 +409,18 @@ def main():
         print(f"全测试模式：共 {len(epochs)} 个 epoch，将依次测试并汇总到 test_results_all_epochs_nvf.csv")
         models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
         if args.threshold_from_val:
-            val_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
+            val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
             val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-            uncertainty_threshold = compute_uncertainty_threshold_iqr(val_loader, models, device, K)
+            uncertainty_threshold = compute_uncertainty_threshold_iqr(
+                val_loader,
+                models,
+                device,
+                K,
+                fault_fusion=fault_fusion,
+                fusion_tau=fusion_tau,
+                ood_score_mode=ood_score_mode,
+                ood_lambda=ood_lambda,
+            )
         else:
             uncertainty_threshold = args.uncertainty_threshold
         del models
@@ -332,7 +428,15 @@ def main():
         for e in epochs:
             models_e = load_models(checkpoint_dir, K, backbone_type, device, epoch=e)
             all_labels_e, all_preds_e, all_uncertainties_e, binary_preds_matrix_e, closed_set_true_e, closed_set_pred_e, *_ = run_test_loop(
-                models_e, test_loader, device, K, uncertainty_threshold
+                models_e,
+                test_loader,
+                device,
+                K,
+                uncertainty_threshold,
+                fault_fusion=fault_fusion,
+                fusion_tau=fusion_tau,
+                ood_score_mode=ood_score_mode,
+                ood_lambda=ood_lambda,
             )
             known_mask_e = all_labels_e < K
             mapped_known_e = all_labels_e[known_mask_e]
@@ -367,16 +471,33 @@ def main():
 
     models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
     if args.threshold_from_val:
-        val_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
+        val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
         val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-        uncertainty_threshold = compute_uncertainty_threshold_iqr(val_loader, models, device, K)
+        uncertainty_threshold = compute_uncertainty_threshold_iqr(
+            val_loader,
+            models,
+            device,
+            K,
+            fault_fusion=fault_fusion,
+            fusion_tau=fusion_tau,
+            ood_score_mode=ood_score_mode,
+            ood_lambda=ood_lambda,
+        )
         print(f"由已知类测试子集 IQR 得到不确定性阈值: {uncertainty_threshold:.4f}")
     else:
         uncertainty_threshold = args.uncertainty_threshold
         print(f"阈值 (u > 此值判 OOD): {uncertainty_threshold}")
 
     all_labels, all_preds, all_uncertainties, binary_preds_matrix, closed_set_true, closed_set_pred, p_yes_matrix, u_k_matrix, logits_pos_matrix, logits_neg_matrix = run_test_loop(
-        models, test_loader, device, K, uncertainty_threshold
+        models,
+        test_loader,
+        device,
+        K,
+        uncertainty_threshold,
+        fault_fusion=fault_fusion,
+        fusion_tau=fusion_tau,
+        ood_score_mode=ood_score_mode,
+        ood_lambda=ood_lambda,
     )
 
     known_mask = all_labels < K
@@ -453,6 +574,63 @@ def main():
             axes[r, c].axis('off')
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, 'confusion_matrix_binary_all_models_nvf.png'), dpi=150)
+        plt.close()
+
+    # 闭集混淆矩阵（仅已知类，忽略 OOD 判别）
+    if len(closed_set_true) > 0:
+        cm_closed = confusion_matrix(closed_set_true, closed_set_pred, labels=np.arange(K))
+        row_sum_closed = cm_closed.sum(axis=1, keepdims=True)
+        cm_closed_pct = np.where(row_sum_closed > 0, cm_closed.astype(float) / row_sum_closed * 100, 0)
+        annot_closed = np.array(
+            [[f'{cm_closed_pct[i, j]:.1f}%' for j in range(cm_closed_pct.shape[1])] for i in range(cm_closed_pct.shape[0])]
+        )
+
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        plt.rcParams['axes.unicode_minus'] = False
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm_closed_pct,
+            annot=annot_closed,
+            fmt='',
+            cmap='Blues',
+            xticklabels=known_classes,
+            yticklabels=known_classes,
+        )
+        plt.title('Confusion Matrix (Closed-set, %)')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'confusion_matrix_closed.png'), dpi=150)
+        plt.close()
+
+    # 全集混淆矩阵（已知类 + Unknown，使用 EDL mean 阈值辅助 OOD 判别）
+    label_names = [str(c) for c in known_classes] + ['Unknown']
+    cm_labels = []
+    cm_preds = []
+    for true_label, pred_label in zip(all_labels, all_preds):
+        true_label = int(true_label)
+        pred_label = int(pred_label)
+
+        cm_labels.append(true_label if true_label < K else K)
+        cm_preds.append(pred_label if 0 <= pred_label < K else K)
+
+    if len(cm_labels) > 0:
+        cm_labels = np.array(cm_labels)
+        cm_preds = np.array(cm_preds)
+        cm = confusion_matrix(cm_labels, cm_preds, labels=np.arange(K + 1))
+        row_sum = cm.sum(axis=1, keepdims=True)
+        cm_pct = np.where(row_sum > 0, cm.astype(float) / row_sum * 100, 0)
+        annot = np.array([[f'{cm_pct[i, j]:.1f}%' for j in range(cm_pct.shape[1])] for i in range(cm_pct.shape[0])])
+
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        plt.rcParams['axes.unicode_minus'] = False
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm_pct, annot=annot, fmt='', cmap='Blues', xticklabels=label_names, yticklabels=label_names)
+        plt.title('Confusion Matrix (method=edl_mean, OOD-Assisted, %)')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'), dpi=150)
         plt.close()
 
     if has_unknown_samples:
@@ -606,6 +784,17 @@ def main():
             vmin=logits_vmin,
             vmax=logits_vmax,
         )
+
+    results_path = os.path.join(output_dir, 'binary_test_results.txt')
+    with open(results_path, 'w', encoding='utf-8') as f:
+        f.write(f"Closed-set Accuracy: {accuracy * 100:.2f}%\n")
+        f.write(
+            f"Strategy: fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+            f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}\n"
+        )
+        f.write(f"OOD Threshold: {uncertainty_threshold:.6f}\n")
+        f.write(f"Average Binary Accuracy: {np.mean(binary_accuracies) * 100:.2f}%\n")
+    print(f"结果摘要已保存: {results_path}")
 
 
 if __name__ == '__main__':

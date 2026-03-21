@@ -1,0 +1,54 @@
+# =========================================================
+# LaoDA EDL Ensemble Binary (NvF)
+# 1D 输入管线: Conv1d [C=64, L=64]
+# =========================================================
+
+data:
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+    unknown_classes:
+      - '7齿轮断齿'
+      - '9齿轮缺齿'
+
+model:
+  type: 'LaoDA'
+
+train:
+  # 训练哪些子模型:
+  # - 'all'      : 训练全部子模型
+  # - 2          : 只训练 model_2
+  # - [0, 2, 6]  : 训练指定多个子模型
+  model_indices: 'all'
+  num_epochs: 80
+  batch_size: 256
+  learning_rate: 0.0005
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF/seed2'
+  save_every_epoch: true
+  notes: 'NvF for bench npy data with LaoDA'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 80
+  kl_weight: 1.0
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0005
+  scheduler:
+    use_scheduler: false
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
+  ensemble_strategy: 'Normal_vs_Fault_i'
+  test_infer:
+    fault_fusion: 'softmax'     # softmax | legacy
+    fusion_tau: 1.0
+    ood_score_mode: 'key_models'  # key_models | mean_all
+    ood_lambda: 0.5
+

@@ -15,12 +15,13 @@ sys.path.append(current_dir)
 
 from common.utils.helpers import load_config, save_experiment_info
 from common.utils.data_loader import NpyPackDataset
+from common.utils.data_loader_1d import NpyPackDataset1D
 from common.edl_losses import edl_mse_loss, edl_digamma_loss, edl_log_loss, relu_evidence
 from common.utils.edl_helpers import one_hot_embedding
 from models import get_model
 
 
-def get_dataset(data_config, split='train'):
+def get_dataset(data_config, model_type, split='train'):
     data_dir = data_config.get('data_dir')
     if data_dir is None:
         raise ValueError("配置文件中必须指定 data.data_dir")
@@ -29,13 +30,45 @@ def get_dataset(data_config, split='train'):
     unknown_classes = openset_config.get('unknown_classes', [])
     if known_classes is None:
         raise ValueError("配置文件中必须指定 data.openset.known_classes")
-    return NpyPackDataset(
+    dataset_cls = NpyPackDataset1D if model_type == 'LaoDA' else NpyPackDataset
+    return dataset_cls(
         data_dir=data_dir,
         split=split,
         filter_classes=known_classes,
         known_classes=known_classes,
         unknown_classes=unknown_classes
     )
+
+
+def resolve_model_indices(train_config, K):
+    """
+    允许在 config 中通过 train.model_indices 指定训练子模型：
+    - 'all' / None: 训练全部 [0..K-1]
+    - int: 只训练一个
+    - list[int]: 训练多个指定索引
+    """
+    model_indices_cfg = train_config.get('model_indices', 'all')
+    if model_indices_cfg is None or model_indices_cfg == 'all':
+        return list(range(K))
+
+    if isinstance(model_indices_cfg, int):
+        model_indices = [model_indices_cfg]
+    elif isinstance(model_indices_cfg, list):
+        model_indices = model_indices_cfg
+    else:
+        raise ValueError("train.model_indices 仅支持 'all'、整数或整数列表")
+
+    normalized = []
+    for k in model_indices:
+        if not isinstance(k, int):
+            raise ValueError("train.model_indices 列表中的元素必须是整数")
+        if k < 0 or k >= K:
+            raise ValueError(f"train.model_indices 包含越界索引 {k}，应在 [0, {K - 1}]")
+        if k not in normalized:
+            normalized.append(k)
+    if not normalized:
+        raise ValueError("train.model_indices 解析后为空，请至少指定一个子模型索引")
+    return normalized
 
 
 def main():
@@ -52,17 +85,16 @@ def main():
     print(f"已知类数量 K={K}")
 
     batch_size = train_config.get('batch_size', 32)
+    backbone_type = model_config.get('type', 'ResNet18_2d_Light')
+    print(f"backbone: {backbone_type}, num_classes=2 per model")
 
-    train_dataset = get_dataset(data_config, split='train')
-    val_dataset = get_dataset(data_config, split='test')
+    train_dataset = get_dataset(data_config, backbone_type, split='train')
+    val_dataset = get_dataset(data_config, backbone_type, split='test')
 
     device_config = train_config.get('device', None)
     cuda_available = torch.cuda.is_available()
     device = torch.device(device_config or ('cuda' if cuda_available else 'cpu'))
     print(f"使用设备: {device}")
-
-    backbone_type = model_config.get('type', 'ResNet18_2d_Light')
-    print(f"backbone: {backbone_type}, num_classes=2 per model")
 
     edl_loss_type = train_config.get('edl_loss_type', 'mse')
     annealing_step = train_config.get('edl_annealing_step', 10)
@@ -101,8 +133,10 @@ def main():
                          start_time=train_start_time)
 
     model_kw = {'num_classes': 2}
+    model_indices = resolve_model_indices(train_config, K)
+    print(f"本次将训练子模型索引: {model_indices}")
 
-    for k in range(K):
+    for k in model_indices:
         print(f"\n{'=' * 60}")
         print(f"训练 OvR 模型 k = {k} / {K - 1}（类别 {k} vs Rest）")
 
@@ -119,7 +153,7 @@ def main():
         print(f"  训练集: 正类={train_pos}, 负类={train_neg} (全预测否准确率={100. * train_neg / len(train_subset):.1f}%)")
         print(f"  验证集: 正类={val_pos}, 负类={val_neg} (全预测否准确率={100. * val_neg / len(val_subset):.1f}%)")
 
-        torch.manual_seed(train_config.get('seed', 42) + k)
+        torch.manual_seed(train_config.get('seed', 42))
 
         model = get_model(backbone_type, **model_kw).to(device)
         if optimizer_type == 'SGD':
@@ -140,6 +174,9 @@ def main():
             train_loss = 0.0
             train_correct = 0
             train_total = 0
+            train_tp = 0
+            train_fp = 0
+            train_fn = 0
 
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
@@ -173,14 +210,22 @@ def main():
                 train_loss += loss.item() * inputs.size(0)
                 train_correct += (preds == binary_labels).sum().item()
                 train_total += inputs.size(0)
+                train_tp += ((preds == 1) & (binary_labels == 1)).sum().item()
+                train_fp += ((preds == 1) & (binary_labels == 0)).sum().item()
+                train_fn += ((preds == 0) & (binary_labels == 1)).sum().item()
 
             train_loss /= len(train_subset)
             train_acc = 100.0 * train_correct / train_total
+            train_recall_pos = 100.0 * train_tp / max(train_tp + train_fn, 1)
+            train_precision_pos = 100.0 * train_tp / max(train_tp + train_fp, 1)
 
             model.eval()
             val_loss = 0.0
             val_correct = 0
             val_total = 0
+            val_tp = 0
+            val_fp = 0
+            val_fn = 0
             with torch.no_grad():
                 for inputs, labels in val_loader:
                     inputs, labels = inputs.to(device), labels.to(device)
@@ -209,9 +254,14 @@ def main():
                     val_loss += loss.item() * inputs.size(0)
                     val_correct += (preds == binary_labels).sum().item()
                     val_total += inputs.size(0)
+                    val_tp += ((preds == 1) & (binary_labels == 1)).sum().item()
+                    val_fp += ((preds == 1) & (binary_labels == 0)).sum().item()
+                    val_fn += ((preds == 0) & (binary_labels == 1)).sum().item()
 
             val_loss /= len(val_subset)
             val_acc = 100.0 * val_correct / val_total
+            val_recall_pos = 100.0 * val_tp / max(val_tp + val_fn, 1)
+            val_precision_pos = 100.0 * val_tp / max(val_tp + val_fp, 1)
             history['train_loss'].append(train_loss)
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
@@ -224,7 +274,10 @@ def main():
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"  Epoch [{epoch + 1}/{num_epochs}] train_loss={train_loss:.4f} "
-                      f"train_acc={train_acc:.2f}% val_loss={val_loss:.4f} val_acc={val_acc:.2f}%")
+                      f"train_acc={train_acc:.2f}% train_rec_pos={train_recall_pos:.2f}% "
+                      f"train_prec_pos={train_precision_pos:.2f}% val_loss={val_loss:.4f} "
+                      f"val_acc={val_acc:.2f}% val_rec_pos={val_recall_pos:.2f}% "
+                      f"val_prec_pos={val_precision_pos:.2f}%")
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc

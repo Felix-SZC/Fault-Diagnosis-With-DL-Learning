@@ -20,10 +20,11 @@ sys.path.append(current_dir)
 
 from common.utils.helpers import load_config
 from common.utils.data_loader import NpyPackDataset
+from common.utils.data_loader_1d import NpyPackDataset1D
 from common.edl_losses import relu_evidence
 from models import get_model
 
-def get_dataset(data_config, split='test', filter_classes=None):
+def get_dataset(data_config, model_type, split='test', filter_classes=None):
     """根据配置动态加载数据集，filter_classes=None 时加载全量（已知+未知）。"""
     data_dir = data_config.get('data_dir')
     if data_dir is None:
@@ -33,7 +34,8 @@ def get_dataset(data_config, split='test', filter_classes=None):
     known_classes = openset_config.get('known_classes')
     unknown_classes = openset_config.get('unknown_classes', [])
     
-    return NpyPackDataset(
+    dataset_cls = NpyPackDataset1D if model_type == 'LaoDA' else NpyPackDataset
+    return dataset_cls(
         data_dir=data_dir,
         split=split,
         filter_classes=filter_classes,
@@ -198,10 +200,10 @@ def run_test_loop(models, test_loader, device, K, uncertainty_threshold):
                 logits_pos_list.append(logits_k[:, 1])
                 logits_neg_list.append(logits_k[:, 0])
 
-            final_probs = torch.stack(p_yes_list, dim=1)
+            p_yes_stack = torch.stack(p_yes_list, dim=1)  # [B, K]
+            final_probs = p_yes_stack
 
             # 记录每个样本在各模型下的正类概率和 u_k
-            p_yes_stack = torch.stack(p_yes_list, dim=1)  # [B, K]
             u_k_stack = torch.stack(u_k_list, dim=1)      # [B, K]
             alpha_pos_all = torch.stack(alpha_pos_list, dim=1)  # [B, K]
             logits_pos_stack = torch.stack(logits_pos_list, dim=1)  # [B, K]
@@ -465,7 +467,7 @@ def main():
                         help="兼容参数（当前脚本一次性计算 mean/positive_only/max_prob/dynamic 四种方法）")
     parser.add_argument('--cm_method',
                         type=str,
-                        default='edl_mean',
+                        default='edl_positive_only',
                         choices=['edl_mean', 'edl_positive_only', 'edl_dynamic', 'max_prob', 'all_rest'],
                         help='用于绘制含 OOD 总体混淆矩阵(confusion_matrix.png)时所采用的集成判断方法')
     parser.add_argument('--plot_detailed_distributions', action='store_true',
@@ -502,7 +504,7 @@ def main():
     backbone_type = model_config.get('type', 'ResNet18_2d_Light')
 
     # 读取测试集全量（先建 loader，用于定阈值和 run_test_loop）
-    test_dataset = get_dataset(data_config, split='test', filter_classes=None)
+    test_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=None)
     test_loader = DataLoader(test_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
     has_unknown_samples = any([v >= K for v in test_dataset.y])
     print(f"测试集大小: {len(test_dataset)}")
@@ -517,7 +519,7 @@ def main():
         # 先加载最佳模型用于定阈值（与默认行为一致）
         models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
         if args.threshold_from_val:
-            val_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
+            val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
             val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
             thresholds = compute_uncertainty_threshold_iqr(val_loader, models, device, K)
         else:
@@ -555,7 +557,7 @@ def main():
     print(f"已加载 K={K} 个模型（最佳权重 model_k.pth），backbone={backbone_type}")
 
     if args.threshold_from_val:
-        val_dataset = get_dataset(data_config, split='test', filter_classes=known_classes)
+        val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
         val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
         thresholds = compute_uncertainty_threshold_iqr(val_loader, models, device, K)
         for m, th in thresholds.items():
