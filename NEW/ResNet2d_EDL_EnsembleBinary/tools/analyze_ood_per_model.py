@@ -10,8 +10,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _root)
 
 from common.utils.helpers import load_config  # noqa: E402
 from common.utils.data_loader import NpyPackDataset  # noqa: E402
@@ -271,8 +271,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="config_OvR.yaml",
-        help="配置文件路径（默认: config_OvR.yaml；NvF 请用 --config config_NvF.yaml）",
+        default="configs/bench_OvR_LaoDA.yaml",
+        help="配置文件路径（相对项目根；NvF 可改用 configs/bench_NvF_LaoDA.yaml）",
     )
     parser.add_argument(
         "--checkpoint",

@@ -10,8 +10,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _root)
 
 from common.utils.helpers import load_config
 from common.utils.data_loader import NpyPackDataset
@@ -239,8 +239,8 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='config.yaml',
-        help='配置文件路径（默认: config.yaml）'
+        default='configs/bench_NvF_LaoDA.yaml',
+        help='配置文件路径（相对项目根；默认: configs/bench_NvF_LaoDA.yaml）'
     )
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='checkpoint 目录（含 model_0.pth..model_{K-1}.pth）；未指定则从 config 的 checkpoint_dir 读取')

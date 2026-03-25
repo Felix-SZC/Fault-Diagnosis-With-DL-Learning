@@ -1,0 +1,62 @@
+# =========================================================
+# 阶段二：NvF + 冻结阶段一 LaoDA 多类预训练 backbone，只训二分类头
+#
+# 运行顺序:
+#   1) python train_lao_da_closed_pretrain.py --config configs/bench_LaoDA_closed_pretrain.yaml
+#   2) python train_nvf_frozen_backbone.py --config configs/bench_NvF_LaoDA_frozen_backbone.yaml
+#   3) python test_NvF.py --config configs/bench_NvF_LaoDA_frozen_backbone.yaml
+#
+# 说明: train.pretrained_multiclass_ckpt 相对于「当前工作目录」解析；
+#       请在 NEW/ResNet2d_EDL_EnsembleBinary 下执行上述命令，或改为绝对路径。
+# =========================================================
+
+data:
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+    unknown_classes:
+      - '7齿轮断齿'
+      - '9齿轮缺齿'
+
+model:
+  type: 'LaoDA'
+
+train:
+  # 阶段一产出（必填）
+  pretrained_multiclass_ckpt: 'checkpoints/LaoDA/closed_pretrain/seed1/pretrained_full.pth'
+  # true: 冻结 conv~mamba~fc1，只训练 fc2；false: 训练 fc1+fc2
+  freeze_fc1: true
+
+  model_indices: 'all'
+  num_epochs: 50
+  batch_size: 256
+  learning_rate: 0.001
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_frozen/seed1'
+  notes: 'NvF with frozen LaoDA backbone from closed pretrain'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 30
+  kl_weight: 20
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0001
+  scheduler:
+    use_scheduler: true
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
+  ensemble_strategy: 'Normal_vs_Fault_i'
+  test_infer:
+    # nvf_fusion: 原 NvF final_probs.argmax；min_u_gated: 模型0 门控 + 故障子模型 argmin(u_k)
+    class_decision: 'nvf_fusion'  # nvf_fusion | min_u_gated
+    fault_fusion: 'legacy'     # softmax | legacy（仅 nvf_fusion 闭集决策用）
+    fusion_tau: 0.5
+    ood_score_mode: 'winner_only'  # winner_only | key_models | mean_all（min_u_gated 下 OOD 分数固定为决策子模型 u，此项无效）
+    ood_lambda: 1

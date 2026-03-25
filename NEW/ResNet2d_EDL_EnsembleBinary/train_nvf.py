@@ -73,7 +73,7 @@ def resolve_model_indices(train_config, K):
 
 def main():
     parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：训练 K 个独立二分类 EDL 小模型')
-    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
     args = parser.parse_args()
 
     config = load_config(args.config)

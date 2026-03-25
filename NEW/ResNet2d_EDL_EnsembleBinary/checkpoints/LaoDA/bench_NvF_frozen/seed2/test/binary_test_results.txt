@@ -1,0 +1,4 @@
+Closed-set Accuracy: 52.36%
+Strategy: fault_fusion=legacy, fusion_tau=1.0000, ood_score_mode=mean_all, ood_lambda=0.5000
+OOD Threshold: 0.500000
+Average Binary Accuracy: 90.78%

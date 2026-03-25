@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import numpy as np
 
-# 确保导入模块正确
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
+# 脚本在 legacy/ 下运行：项目根在上一级（供 common、models 导入）
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _root)
 
 from common.utils.helpers import load_config, save_experiment_info
 from common.utils.data_loader import NpyPackDataset
@@ -46,8 +46,8 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='config.yaml',
-        help='配置文件路径（默认: config.yaml）'
+        default='configs/bench_NvF_LaoDA.yaml',
+        help='配置文件路径（相对项目根；默认: configs/bench_NvF_LaoDA.yaml）'
     )
     args = parser.parse_args()
 

@@ -447,8 +447,8 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='config.yaml',
-        help='配置文件路径（默认: config.yaml）'
+        default='configs/bench_OvR_LaoDA.yaml',
+        help='配置文件路径（相对项目根；默认: configs/bench_OvR_LaoDA.yaml）'
     )
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='checkpoint 目录（含 model_0.pth..model_{K-1}.pth）；未指定则从 config 的 checkpoint_dir 读取')

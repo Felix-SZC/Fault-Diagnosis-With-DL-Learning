@@ -1,3 +1,11 @@
+"""
+阶段二：NvF 各子模型在冻结 LaoDA backbone 上只训练二分类头 fc2（可选解冻 fc1）。
+依赖阶段一 train_lao_da_closed_pretrain.py 产出的 pretrained_full.pth。
+
+保存的 model_k.pth 与 train_nvf.py 格式一致，可直接用 test_NvF.py 加载。
+
+不修改 train_nvf.py / test_NvF.py / LaoDA.py。
+"""
 import argparse
 import os
 import sys
@@ -16,6 +24,11 @@ sys.path.append(current_dir)
 from common.utils.helpers import load_config, save_experiment_info
 from common.utils.data_loader import NpyPackDataset
 from common.utils.data_loader_1d import NpyPackDataset1D
+from common.utils.lao_da_pretrained import (
+    load_lao_da_backbone_from_multiclass_ckpt,
+    set_lao_da_trainable_heads,
+    summarize_trainable_params,
+)
 from common.edl_losses import edl_mse_loss, edl_digamma_loss, edl_log_loss, relu_evidence
 from common.utils.edl_helpers import one_hot_embedding
 from models import get_model
@@ -36,17 +49,11 @@ def get_dataset(data_config, model_type, split='train'):
         split=split,
         filter_classes=known_classes,
         known_classes=known_classes,
-        unknown_classes=unknown_classes
+        unknown_classes=unknown_classes,
     )
 
 
 def resolve_model_indices(train_config, K):
-    """
-    允许在 config 中通过 train.model_indices 指定训练子模型：
-    - 'all' / None: 训练全部 [0..K-1]
-    - int: 只训练一个
-    - list[int]: 训练多个指定索引
-    """
     model_indices_cfg = train_config.get('model_indices', 'all')
     if model_indices_cfg is None or model_indices_cfg == 'all':
         return list(range(K))
@@ -71,9 +78,15 @@ def resolve_model_indices(train_config, K):
     return normalized
 
 
+def _resolve_pretrained_path(raw_path: str) -> str:
+    if os.path.isabs(raw_path):
+        return raw_path
+    return os.path.normpath(os.path.join(os.getcwd(), raw_path))
+
+
 def main():
-    parser = argparse.ArgumentParser(description='EDL 集成二分类 (OvR)：训练 K 个独立二分类 EDL 小模型')
-    parser.add_argument('--config', type=str, default='configs/bench_OvR_LaoDA.yaml')
+    parser = argparse.ArgumentParser(description='NvF + 冻结 LaoDA 预训练 backbone，只训二分类头')
+    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA_frozen_backbone.yaml')
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -84,16 +97,27 @@ def main():
     K = len(data_config['openset']['known_classes'])
     print(f"已知类数量 K={K}")
 
+    backbone_type = model_config.get('type', 'LaoDA')
+    if backbone_type != 'LaoDA':
+        raise ValueError(f"train_nvf_frozen_backbone 仅支持 LaoDA，当前 model.type={backbone_type}")
+
+    pre_raw = train_config.get('pretrained_multiclass_ckpt')
+    if not pre_raw:
+        raise ValueError("请在 train.pretrained_multiclass_ckpt 中指定阶段一 pretrained_full.pth 路径")
+    pretrained_path = _resolve_pretrained_path(pre_raw)
+    print(f"多类预训练权重: {pretrained_path}")
+
+    freeze_fc1 = train_config.get('freeze_fc1', True)
+    print(f"freeze_fc1={freeze_fc1} （True 时仅训练 fc2；False 时训练 fc1+fc2）")
+
     batch_size = train_config.get('batch_size', 32)
-    backbone_type = model_config.get('type', 'ResNet18_2d_Light')
-    print(f"backbone: {backbone_type}, num_classes=2 per model")
+    print(f"backbone: {backbone_type}, num_classes=2 per model (frozen backbone)")
 
     train_dataset = get_dataset(data_config, backbone_type, split='train')
     val_dataset = get_dataset(data_config, backbone_type, split='test')
 
     device_config = train_config.get('device', None)
-    cuda_available = torch.cuda.is_available()
-    device = torch.device(device_config or ('cuda' if cuda_available else 'cpu'))
+    device = torch.device(device_config or ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f"使用设备: {device}")
 
     edl_loss_type = train_config.get('edl_loss_type', 'mse')
@@ -123,14 +147,17 @@ def main():
     momentum = float(train_config.get('momentum', 0.9))
     weight_decay = float(train_config.get('weight_decay', 1e-4))
 
-    ensemble_strategy = train_config.get('ensemble_strategy', 'One_vs_Rest')
-    if ensemble_strategy != 'One_vs_Rest':
-        print(f"警告：train_ovr.py 仅支持 One_vs_Rest，但配置中 ensemble_strategy={ensemble_strategy}，将按 One_vs_Rest 训练。")
-    print("使用集成策略: One_vs_Rest (OvR)")
+    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
+    if ensemble_strategy != 'Normal_vs_Fault_i':
+        print(f"警告：仅支持 Normal_vs_Fault_i，配置为 {ensemble_strategy}，仍按 NvF 训练。")
+    print("使用集成策略: Normal_vs_Fault_i (NvF) + 冻结预训练 backbone")
 
     train_start_time = datetime.now()
-    save_experiment_info(config, checkpoint_dir, model=None, train_dataset=train_dataset, val_dataset=val_dataset,
-                         start_time=train_start_time)
+    save_experiment_info(
+        config, checkpoint_dir, model=None,
+        train_dataset=train_dataset, val_dataset=val_dataset,
+        start_time=train_start_time,
+    )
 
     model_kw = {'num_classes': 2}
     model_indices = resolve_model_indices(train_config, K)
@@ -138,14 +165,24 @@ def main():
 
     for k in model_indices:
         print(f"\n{'=' * 60}")
-        print(f"训练 OvR 模型 k = {k} / {K - 1}（类别 {k} vs Rest）")
-
-        train_subset = train_dataset
-        val_subset = val_dataset
-        train_pos = np.sum(train_dataset.y == k)
-        train_neg = len(train_dataset) - train_pos
-        val_pos = np.sum(val_dataset.y == k)
-        val_neg = len(val_dataset) - val_pos
+        if k == 0:
+            print(f"训练二分类模型 k = 0 / {K - 1}（正常 vs 所有故障）")
+            train_subset = train_dataset
+            val_subset = val_dataset
+            train_pos = np.sum(train_dataset.y == 0)
+            train_neg = len(train_dataset) - train_pos
+            val_pos = np.sum(val_dataset.y == 0)
+            val_neg = len(val_dataset) - val_pos
+        else:
+            print(f"训练二分类模型 k = {k} / {K - 1}（正常 vs 第 {k} 类故障）")
+            train_indices = np.where((train_dataset.y == 0) | (train_dataset.y == k))[0]
+            val_indices = np.where((val_dataset.y == 0) | (val_dataset.y == k))[0]
+            train_subset = Subset(train_dataset, train_indices)
+            val_subset = Subset(val_dataset, val_indices)
+            train_pos = np.sum(train_dataset.y[train_indices] == k)
+            train_neg = np.sum(train_dataset.y[train_indices] == 0)
+            val_pos = np.sum(val_dataset.y[val_indices] == k)
+            val_neg = np.sum(val_dataset.y[val_indices] == 0)
 
         train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
@@ -153,13 +190,23 @@ def main():
         print(f"  训练集: 正类={train_pos}, 负类={train_neg} (全预测否准确率={100. * train_neg / len(train_subset):.1f}%)")
         print(f"  验证集: 正类={val_pos}, 负类={val_neg} (全预测否准确率={100. * val_neg / len(val_subset):.1f}%)")
 
-        torch.manual_seed(train_config.get('seed', 42))
+        torch.manual_seed(train_config.get('seed', 42) + k)
 
         model = get_model(backbone_type, **model_kw).to(device)
+        loaded, skipped = load_lao_da_backbone_from_multiclass_ckpt(model, pretrained_path, device)
+        print(f"  已从预训练加载 {len(loaded)} 个张量；跳过 fc2 等: {len(skipped)} 项")
+        set_lao_da_trainable_heads(model, train_fc1=not freeze_fc1)
+        trainable_names = summarize_trainable_params(model)
+        print(f"  可训练参数 ({len(trainable_names)}): {trainable_names}")
+
+        params_train = [p for p in model.parameters() if p.requires_grad]
+        if not params_train:
+            raise RuntimeError("没有可训练参数，请检查 freeze_fc1 与模型结构")
+
         if optimizer_type == 'SGD':
-            optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
+            optimizer = optim.SGD(params_train, lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
         else:
-            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+            optimizer = optim.Adam(params_train, lr=learning_rate)
 
         if use_scheduler and sch_type == 'StepLR':
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
@@ -167,6 +214,7 @@ def main():
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=1)
 
         best_val_acc = 0.0
+        best_val_loss = float('inf')
         history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
 
         for epoch in range(num_epochs):
@@ -174,13 +222,14 @@ def main():
             train_loss = 0.0
             train_correct = 0
             train_total = 0
-            train_tp = 0
-            train_fp = 0
-            train_fn = 0
+            train_tp = train_fp = train_fn = 0
 
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                binary_labels = (labels == k).long()
+                if k == 0:
+                    binary_labels = (labels == 0).long()
+                else:
+                    binary_labels = (labels == k).long()
                 optimizer.zero_grad()
                 out = model(inputs)
                 logits = out[0] if isinstance(out, tuple) else out
@@ -221,15 +270,14 @@ def main():
 
             model.eval()
             val_loss = 0.0
-            val_correct = 0
-            val_total = 0
-            val_tp = 0
-            val_fp = 0
-            val_fn = 0
+            val_correct = val_total = val_tp = val_fp = val_fn = 0
             with torch.no_grad():
                 for inputs, labels in val_loader:
                     inputs, labels = inputs.to(device), labels.to(device)
-                    binary_labels = (labels == k).long()
+                    if k == 0:
+                        binary_labels = (labels == 0).long()
+                    else:
+                        binary_labels = (labels == k).long()
                     out = model(inputs)
                     logits = out[0] if isinstance(out, tuple) else out
 
@@ -279,18 +327,22 @@ def main():
                       f"val_acc={val_acc:.2f}% val_rec_pos={val_recall_pos:.2f}% "
                       f"val_prec_pos={val_precision_pos:.2f}%")
 
-            if val_acc > best_val_acc:
+            if val_acc >= best_val_acc:
                 best_val_acc = val_acc
+                best_val_loss = val_loss
                 path_k = os.path.join(checkpoint_dir, f'model_{k}.pth')
-                torch.save({'state_dict': model.state_dict(), 'k': k, 'best_val_acc': best_val_acc}, path_k)
+                torch.save({'state_dict': model.state_dict(), 'k': k, 'best_val_acc': best_val_acc, 'best_val_loss': best_val_loss}, path_k)
 
         path_k = os.path.join(checkpoint_dir, f'model_{k}.pth')
         if not os.path.exists(path_k):
             torch.save({'state_dict': model.state_dict(), 'k': k, 'best_val_acc': best_val_acc}, path_k)
-        print(f"模型 k={k} 已保存: {path_k}, best_val_acc={best_val_acc:.2f}%")
+        print(f"模型 k={k} 已保存: {path_k}, best_val_acc={best_val_acc:.2f}%, best_val_loss={best_val_loss:.4f}")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-        fig.suptitle(f'Model k={k} (Class {k} vs Rest)')
+        if k == 0:
+            fig.suptitle(f'Model k=0 frozen-backbone NvF')
+        else:
+            fig.suptitle(f'Model k={k} frozen-backbone NvF')
         ax1.plot(history['train_loss'], label='Train')
         ax1.plot(history['val_loss'], label='Val')
         ax1.set_xlabel('Epoch')
@@ -307,7 +359,6 @@ def main():
         fig.savefig(os.path.join(checkpoint_dir, f'training_curves_{k}.png'), dpi=150)
         plt.close(fig)
 
-    train_end_time = datetime.now()
     save_experiment_info(
         config=config,
         checkpoint_dir=checkpoint_dir,
@@ -317,11 +368,10 @@ def main():
         history=None,
         best_val_acc=None,
         start_time=train_start_time,
-        end_time=train_end_time,
+        end_time=datetime.now(),
     )
-    print("\nK 个 OvR 二分类 EDL 模型训练完成。")
+    print("\n阶段二完成。测试: python test_NvF.py --config configs/bench_NvF_LaoDA_frozen_backbone.yaml")
 
 
 if __name__ == '__main__':
     main()
-

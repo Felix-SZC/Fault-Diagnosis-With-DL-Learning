@@ -1,0 +1,28 @@
+ckpt=checkpoints/LaoDA/closed_pretrain/seed2\pretrained_full.pth
+config=configs/bench_LaoDA_closed_pretrain.yaml
+split=test
+accuracy=99.6429%
+
+              precision    recall  f1-score   support
+
+         1正常       0.99      1.00      1.00       200
+       2轴承内圈       1.00      1.00      1.00       200
+       3轴承外圈       1.00      1.00      1.00       200
+       4轴承滚子       1.00      0.99      1.00       200
+       5轴承组合       1.00      1.00      1.00       200
+       6齿根裂纹       0.99      0.98      0.99       200
+       8齿轮点蚀       1.00      0.99      1.00       200
+
+    accuracy                           1.00      1400
+   macro avg       1.00      1.00      1.00      1400
+weighted avg       1.00      1.00      1.00      1400
+
+
+confusion_matrix (counts):
+[[200   0   0   0   0   0   0]
+ [  0 200   0   0   0   0   0]
+ [  0   0 200   0   0   0   0]
+ [  0   0   0 199   0   1   0]
+ [  0   0   0   0 200   0   0]
+ [  2   1   0   0   0 197   0]
+ [  0   0   0   0   0   1 199]]

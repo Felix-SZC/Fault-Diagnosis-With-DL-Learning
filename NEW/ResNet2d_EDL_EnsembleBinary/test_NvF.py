@@ -86,6 +86,7 @@ def compute_uncertainty_threshold_iqr(
     fusion_tau=1.0,
     ood_score_mode='mean_all',
     ood_lambda=0.5,
+    class_decision='nvf_fusion',
 ):
     for m in models:
         m.eval()
@@ -107,17 +108,76 @@ def compute_uncertainty_threshold_iqr(
                 p_yes_list.append(p_yes_k)
 
             u_k_stack = torch.stack(u_k_list, dim=1)  # [B, K]
-            _, winner_fault_idx = build_nvf_final_probs_and_winner(
-                p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
-            )
-            score = compute_batch_ood_score(
-                u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
-            )
+            if class_decision == 'min_u_gated':
+                _, score = gated_min_u_preds_and_ood(u_k_stack, p_yes_list, K)
+            else:
+                _, winner_fault_idx = build_nvf_final_probs_and_winner(
+                    p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
+                )
+                score = compute_batch_ood_score(
+                    u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+                )
             uncertainties_list.append(score.cpu().numpy())
     all_u = np.concatenate(uncertainties_list)
     q1, q3 = np.percentile(all_u, [25, 75])
     iqr = q3 - q1
     return float(q3 + 1.5 * iqr)
+
+
+def gated_min_u_preds_and_ood(u_k_stack, p_yes_list, K):
+    """
+    门控 + 最小不确定度闭集决策（与 NvF 模型0语义一致）：
+    - 模型0：p_yes_list[0] 为「正常」正类概率；p_yes_0 > 0.5 → 预测类别 0，OOD=u_0。
+    - 否则（故障分支）：在模型 1..K-1 中，仅考虑 p_yes_k > 0.5（子模型判为故障）的索引，
+      在这些索引上取 u_k=2/S_k 最小者为故障类（argmin 平局取第一个最小值）。
+    - 若无一子模型 p_yes>0.5：闭集类取 1..K-1 上 p_yes 最大者，OOD 分数=1.0（满分不确定度）。
+
+    Args:
+        u_k_stack: [B, K]
+        p_yes_list: 长度 K 的 list，每项 [B]
+        K: 已知类数
+
+    Returns:
+        preds: LongTensor [B]，取值 0..K-1
+        ood_score: FloatTensor [B]
+    """
+    device = u_k_stack.device
+    dtype = u_k_stack.dtype
+    B = u_k_stack.shape[0]
+    p0 = p_yes_list[0]
+    normal_mask = p0 > 0.5
+
+    if K <= 1:
+        preds = torch.zeros(B, dtype=torch.long, device=device)
+        ood_score = u_k_stack[:, 0]
+        return preds, ood_score
+
+    u_fault = u_k_stack[:, 1:K]  # [B, K-1]
+    p_fault = torch.stack(p_yes_list[1:K], dim=1)
+    valid = p_fault > 0.5
+    has_any = valid.any(dim=1)
+
+    inf = torch.tensor(float('inf'), device=device, dtype=dtype)
+    u_masked = torch.where(valid, u_fault, inf)
+    k_rel_minu = u_masked.argmin(dim=1)
+    fault_pred_minu = (k_rel_minu + 1).long()
+
+    k_rel_maxp = p_fault.argmax(dim=1)
+    fault_pred_fallback = (k_rel_maxp + 1).long()
+
+    fault_preds = torch.where(has_any, fault_pred_minu, fault_pred_fallback)
+
+    ood_minu = u_k_stack.gather(1, fault_pred_minu.unsqueeze(1)).squeeze(1)
+    ood_fallback = torch.ones(B, device=device, dtype=dtype)
+    ood_fault = torch.where(has_any, ood_minu, ood_fallback)
+
+    preds = torch.where(
+        normal_mask,
+        torch.zeros(B, dtype=torch.long, device=device),
+        fault_preds,
+    )
+    ood_score = torch.where(normal_mask, u_k_stack[:, 0], ood_fault)
+    return preds, ood_score
 
 
 def build_nvf_final_probs_and_winner(p_yes_list, K, fault_fusion='legacy', fusion_tau=1.0):
@@ -151,6 +211,8 @@ def build_nvf_final_probs_and_winner(p_yes_list, K, fault_fusion='legacy', fusio
 
 
 def compute_batch_ood_score(u_k_stack, winner_fault_idx, ood_score_mode='mean_all', ood_lambda=0.5):
+    if ood_score_mode == 'winner_only':
+        return u_k_stack.gather(1, winner_fault_idx.view(-1, 1)).squeeze(1)
     if ood_score_mode == 'key_models':
         lam = float(ood_lambda)
         lam = min(max(lam, 0.0), 1.0)
@@ -170,6 +232,7 @@ def run_test_loop(
     fusion_tau=1.0,
     ood_score_mode='mean_all',
     ood_lambda=0.5,
+    class_decision='nvf_fusion',
 ):
     all_labels = []
     all_preds = []
@@ -204,9 +267,16 @@ def run_test_loop(
                 logits_pos_list.append(logits_k[:, 1])
                 logits_neg_list.append(logits_k[:, 0])
 
-            final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
-                p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
-            )
+            if class_decision == 'min_u_gated':
+                u_k_stack_early = torch.stack(u_k_list, dim=1)
+                preds_t, ood_t = gated_min_u_preds_and_ood(u_k_stack_early, p_yes_list, K)
+                preds_local = preds_t.cpu().numpy()
+                winner_fault_idx = None  # 仅 nvf_fusion 路径使用
+            else:
+                final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
+                    p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
+                )
+                preds_local = final_probs.argmax(dim=1).cpu().numpy()
 
             binary_preds = []
             binary_preds.append((p_yes_list[0] > 0.5).cpu().numpy().astype(np.int32))
@@ -225,15 +295,17 @@ def run_test_loop(
             logits_pos_rows.append(logits_pos_stack.cpu().numpy())
             logits_neg_rows.append(logits_neg_stack.cpu().numpy())
 
-            preds_local = final_probs.argmax(dim=1).cpu().numpy()
             for i in range(len(labels)):
                 if int(labels[i]) < K:
                     closed_set_true.append(int(labels[i]))
                     closed_set_pred.append(int(preds_local[i]))
 
-            uncertainty = compute_batch_ood_score(
-                u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
-            ).cpu().numpy()
+            if class_decision == 'min_u_gated':
+                uncertainty = ood_t.cpu().numpy()
+            else:
+                uncertainty = compute_batch_ood_score(
+                    u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+                ).cpu().numpy()
 
             for i in range(len(labels)):
                 u_val = float(uncertainty[i])
@@ -344,7 +416,7 @@ def plot_class_model_heatmap(
 
 def main():
     parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：仅使用 EDL mean 不确定度的测试脚本')
-    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--test_all_epochs', '--all', action='store_true', dest='test_all_epochs')
     parser.add_argument('--uncertainty_threshold', '--uncertainty', type=float, default=0.5, dest='uncertainty_threshold')
@@ -352,8 +424,9 @@ def main():
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--fault_fusion', type=str, default=None, choices=['legacy', 'softmax'])
     parser.add_argument('--fusion_tau', type=float, default=None)
-    parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models'])
+    parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models', 'winner_only'])
     parser.add_argument('--ood_lambda', type=float, default=None)
+    parser.add_argument('--class_decision', type=str, default=None, choices=['nvf_fusion', 'min_u_gated'])
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -373,13 +446,22 @@ def main():
     fusion_tau = args.fusion_tau if args.fusion_tau is not None else float(test_infer_cfg.get('fusion_tau', 1.0))
     ood_score_mode = args.ood_score_mode if args.ood_score_mode is not None else test_infer_cfg.get('ood_score_mode', 'mean_all')
     ood_lambda = args.ood_lambda if args.ood_lambda is not None else float(test_infer_cfg.get('ood_lambda', 0.5))
+    class_decision = args.class_decision if args.class_decision is not None else test_infer_cfg.get('class_decision', 'nvf_fusion')
+    if class_decision not in ('nvf_fusion', 'min_u_gated'):
+        raise ValueError(f"不支持的 class_decision={class_decision}，应为 nvf_fusion 或 min_u_gated")
     if fusion_tau <= 0:
         raise ValueError("fusion_tau 必须 > 0")
     ood_lambda = min(max(float(ood_lambda), 0.0), 1.0)
     print(
-        f"测试策略: fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+        f"测试策略: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
         f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}"
     )
+    if class_decision == 'min_u_gated':
+        print(
+            "  [min_u_gated] 闭集：模型0 判正常→类0；否则仅在 p_yes>0.5 的故障子模型中取 u 最小者为故障类；"
+            "若全无 p_yes>0.5 则 argmax(p_yes) 定类且 OOD=1.0；其余 OOD=决策子模型 u。"
+            "（忽略 ood_score_mode/ood_lambda；fault_fusion/fusion_tau 不参与类别决策。）"
+        )
 
     if args.checkpoint:
         checkpoint_dir = os.path.abspath(args.checkpoint)
@@ -420,6 +502,7 @@ def main():
                 fusion_tau=fusion_tau,
                 ood_score_mode=ood_score_mode,
                 ood_lambda=ood_lambda,
+                class_decision=class_decision,
             )
         else:
             uncertainty_threshold = args.uncertainty_threshold
@@ -437,6 +520,7 @@ def main():
                 fusion_tau=fusion_tau,
                 ood_score_mode=ood_score_mode,
                 ood_lambda=ood_lambda,
+                class_decision=class_decision,
             )
             known_mask_e = all_labels_e < K
             mapped_known_e = all_labels_e[known_mask_e]
@@ -482,6 +566,7 @@ def main():
             fusion_tau=fusion_tau,
             ood_score_mode=ood_score_mode,
             ood_lambda=ood_lambda,
+            class_decision=class_decision,
         )
         print(f"由已知类测试子集 IQR 得到不确定性阈值: {uncertainty_threshold:.4f}")
     else:
@@ -498,6 +583,7 @@ def main():
         fusion_tau=fusion_tau,
         ood_score_mode=ood_score_mode,
         ood_lambda=ood_lambda,
+        class_decision=class_decision,
     )
 
     known_mask = all_labels < K
@@ -789,7 +875,7 @@ def main():
     with open(results_path, 'w', encoding='utf-8') as f:
         f.write(f"Closed-set Accuracy: {accuracy * 100:.2f}%\n")
         f.write(
-            f"Strategy: fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+            f"Strategy: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
             f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}\n"
         )
         f.write(f"OOD Threshold: {uncertainty_threshold:.6f}\n")

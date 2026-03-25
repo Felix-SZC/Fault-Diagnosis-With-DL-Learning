@@ -1,0 +1,4 @@
+Closed-set Accuracy: 46.00%
+Strategy: class_decision=nvf_fusion, fault_fusion=legacy, fusion_tau=0.5000, ood_score_mode=winner_only, ood_lambda=1.0000
+OOD Threshold: 0.500000
+Average Binary Accuracy: 100.00%
