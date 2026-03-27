@@ -1,6 +1,8 @@
 import argparse
+import csv
 import os
 import sys
+import shutil
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -96,6 +98,7 @@ def compute_uncertainty_threshold_iqr(
             inputs = inputs.to(device)
             u_k_list = []
             p_yes_list = []
+            alpha_pos_list = []
             for k in range(K):
                 logits_k = models[k](inputs)
                 evidence_k = relu_evidence(logits_k)
@@ -104,18 +107,36 @@ def compute_uncertainty_threshold_iqr(
                 u_k = 2.0 / S_k
                 probs_k = alpha_k / S_k.unsqueeze(1)
                 p_yes_k = probs_k[:, 1]
+                alpha_pos_k = alpha_k[:, 1]
                 u_k_list.append(u_k)
                 p_yes_list.append(p_yes_k)
+                alpha_pos_list.append(alpha_pos_k)
 
             u_k_stack = torch.stack(u_k_list, dim=1)  # [B, K]
+            alpha_pos_stack = torch.stack(alpha_pos_list, dim=1)  # [B, K]
             if class_decision == 'min_u_gated':
-                _, score = gated_min_u_preds_and_ood(u_k_stack, p_yes_list, K)
+                preds_t, score = gated_min_u_preds_and_ood(u_k_stack, p_yes_list, K)
+                if ood_score_mode == 'winner_pos_only':
+                    score = compute_batch_ood_score(
+                        u_k_stack,
+                        winner_fault_idx=torch.zeros_like(preds_t),
+                        ood_score_mode=ood_score_mode,
+                        ood_lambda=ood_lambda,
+                        alpha_pos_stack=alpha_pos_stack,
+                        pred_idx=preds_t,
+                    )
             else:
-                _, winner_fault_idx = build_nvf_final_probs_and_winner(
+                final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
                     p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
                 )
+                preds_t = final_probs.argmax(dim=1)
                 score = compute_batch_ood_score(
-                    u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+                    u_k_stack,
+                    winner_fault_idx,
+                    ood_score_mode=ood_score_mode,
+                    ood_lambda=ood_lambda,
+                    alpha_pos_stack=alpha_pos_stack,
+                    pred_idx=preds_t,
                 )
             uncertainties_list.append(score.cpu().numpy())
     all_u = np.concatenate(uncertainties_list)
@@ -210,7 +231,20 @@ def build_nvf_final_probs_and_winner(p_yes_list, K, fault_fusion='legacy', fusio
     return final_probs, winner_fault_idx
 
 
-def compute_batch_ood_score(u_k_stack, winner_fault_idx, ood_score_mode='mean_all', ood_lambda=0.5):
+def compute_batch_ood_score(
+    u_k_stack,
+    winner_fault_idx,
+    ood_score_mode='mean_all',
+    ood_lambda=0.5,
+    alpha_pos_stack=None,
+    pred_idx=None,
+):
+    if ood_score_mode == 'winner_pos_only':
+        if alpha_pos_stack is None or pred_idx is None:
+            raise ValueError("winner_pos_only 需要 alpha_pos_stack 与 pred_idx")
+        pred_idx = pred_idx.long().clamp(min=0, max=alpha_pos_stack.shape[1] - 1)
+        winner_alpha_pos = alpha_pos_stack.gather(1, pred_idx.view(-1, 1)).squeeze(1)
+        return 2.0 / (winner_alpha_pos + 1.0)
     if ood_score_mode == 'winner_only':
         return u_k_stack.gather(1, winner_fault_idx.view(-1, 1)).squeeze(1)
     if ood_score_mode == 'key_models':
@@ -244,12 +278,19 @@ def run_test_loop(
     u_k_rows = []
     logits_pos_rows = []
     logits_neg_rows = []
+    winner_model_idx_rows = []
+    winner_p_yes_rows = []
+    winner_pos_logit_rows = []
+    winner_neg_logit_rows = []
+    sample_index_rows = []
+    sample_cursor = 0
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs = inputs.to(device)
             p_yes_list = []
             u_k_list = []
+            alpha_pos_list = []
             logits_pos_list = []
             logits_neg_list = []
             for k in range(K):
@@ -260,9 +301,11 @@ def run_test_loop(
                 probs_k = alpha_k / S_k.unsqueeze(1)
                 p_yes_k = probs_k[:, 1]
                 u_k_k = 2.0 / S_k
+                alpha_pos_k = alpha_k[:, 1]
 
                 p_yes_list.append(p_yes_k)
                 u_k_list.append(u_k_k)
+                alpha_pos_list.append(alpha_pos_k)
 
                 logits_pos_list.append(logits_k[:, 1])
                 logits_neg_list.append(logits_k[:, 0])
@@ -287,6 +330,7 @@ def run_test_loop(
             # 记录每个样本在各模型下的正类概率和 u_k 以及 logits
             p_yes_stack = torch.stack(p_yes_list, dim=1)       # [B, K]
             u_k_stack = torch.stack(u_k_list, dim=1)           # [B, K]
+            alpha_pos_stack = torch.stack(alpha_pos_list, dim=1)  # [B, K]
             logits_pos_stack = torch.stack(logits_pos_list, dim=1)  # [B, K]
             logits_neg_stack = torch.stack(logits_neg_list, dim=1)  # [B, K]
 
@@ -301,11 +345,38 @@ def run_test_loop(
                     closed_set_pred.append(int(preds_local[i]))
 
             if class_decision == 'min_u_gated':
-                uncertainty = ood_t.cpu().numpy()
+                if ood_score_mode == 'winner_pos_only':
+                    pred_idx_t = torch.from_numpy(preds_local).to(inputs.device)
+                    uncertainty = compute_batch_ood_score(
+                        u_k_stack,
+                        winner_fault_idx=torch.zeros_like(pred_idx_t),
+                        ood_score_mode=ood_score_mode,
+                        ood_lambda=ood_lambda,
+                        alpha_pos_stack=alpha_pos_stack,
+                        pred_idx=pred_idx_t,
+                    ).cpu().numpy()
+                else:
+                    uncertainty = ood_t.cpu().numpy()
             else:
+                pred_idx_t = torch.from_numpy(preds_local).to(inputs.device)
                 uncertainty = compute_batch_ood_score(
-                    u_k_stack, winner_fault_idx, ood_score_mode=ood_score_mode, ood_lambda=ood_lambda
+                    u_k_stack,
+                    winner_fault_idx,
+                    ood_score_mode=ood_score_mode,
+                    ood_lambda=ood_lambda,
+                    alpha_pos_stack=alpha_pos_stack,
+                    pred_idx=pred_idx_t,
                 ).cpu().numpy()
+
+            pred_idx_np = np.asarray(preds_local, dtype=np.int64)
+            pred_idx_np = np.clip(pred_idx_np, 0, K - 1)
+            row_idx = np.arange(len(pred_idx_np))
+            winner_model_idx_rows.append(pred_idx_np)
+            winner_p_yes_rows.append(p_yes_stack.cpu().numpy()[row_idx, pred_idx_np])
+            winner_pos_logit_rows.append(logits_pos_stack.cpu().numpy()[row_idx, pred_idx_np])
+            winner_neg_logit_rows.append(logits_neg_stack.cpu().numpy()[row_idx, pred_idx_np])
+            sample_index_rows.append(np.arange(sample_cursor, sample_cursor + len(pred_idx_np), dtype=np.int64))
+            sample_cursor += len(pred_idx_np)
 
             for i in range(len(labels)):
                 u_val = float(uncertainty[i])
@@ -327,6 +398,11 @@ def run_test_loop(
     u_k_matrix = np.concatenate(u_k_rows, axis=0)
     logits_pos_matrix = np.concatenate(logits_pos_rows, axis=0)
     logits_neg_matrix = np.concatenate(logits_neg_rows, axis=0)
+    winner_model_idx = np.concatenate(winner_model_idx_rows, axis=0)
+    winner_p_yes = np.concatenate(winner_p_yes_rows, axis=0)
+    winner_pos_logit = np.concatenate(winner_pos_logit_rows, axis=0)
+    winner_neg_logit = np.concatenate(winner_neg_logit_rows, axis=0)
+    sample_index = np.concatenate(sample_index_rows, axis=0)
     return (
         all_labels,
         all_preds,
@@ -338,6 +414,11 @@ def run_test_loop(
         u_k_matrix,
         logits_pos_matrix,
         logits_neg_matrix,
+        winner_model_idx,
+        winner_p_yes,
+        winner_pos_logit,
+        winner_neg_logit,
+        sample_index,
     )
 
 
@@ -414,178 +495,35 @@ def plot_class_model_heatmap(
     plt.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：仅使用 EDL mean 不确定度的测试脚本')
-    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
-    parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--test_all_epochs', '--all', action='store_true', dest='test_all_epochs')
-    parser.add_argument('--uncertainty_threshold', '--uncertainty', type=float, default=0.5, dest='uncertainty_threshold')
-    parser.add_argument('--threshold_from_val', action='store_true')
-    parser.add_argument('--output_dir', type=str, default=None)
-    parser.add_argument('--fault_fusion', type=str, default=None, choices=['legacy', 'softmax'])
-    parser.add_argument('--fusion_tau', type=float, default=None)
-    parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models', 'winner_only'])
-    parser.add_argument('--ood_lambda', type=float, default=None)
-    parser.add_argument('--class_decision', type=str, default=None, choices=['nvf_fusion', 'min_u_gated'])
-    args = parser.parse_args()
-
-    config = load_config(args.config)
-    data_config = config['data']
-    model_config = config['model']
-    train_config = config['train']
-
-    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
-    if ensemble_strategy != 'Normal_vs_Fault_i':
-        print(f"警告：配置中的 ensemble_strategy={ensemble_strategy}，但 test_NvF.py 仅支持 Normal_vs_Fault_i，将按该策略解释结果。")
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
-
-    test_infer_cfg = train_config.get('test_infer', {})
-    fault_fusion = args.fault_fusion if args.fault_fusion is not None else test_infer_cfg.get('fault_fusion', 'legacy')
-    fusion_tau = args.fusion_tau if args.fusion_tau is not None else float(test_infer_cfg.get('fusion_tau', 1.0))
-    ood_score_mode = args.ood_score_mode if args.ood_score_mode is not None else test_infer_cfg.get('ood_score_mode', 'mean_all')
-    ood_lambda = args.ood_lambda if args.ood_lambda is not None else float(test_infer_cfg.get('ood_lambda', 0.5))
-    class_decision = args.class_decision if args.class_decision is not None else test_infer_cfg.get('class_decision', 'nvf_fusion')
-    if class_decision not in ('nvf_fusion', 'min_u_gated'):
-        raise ValueError(f"不支持的 class_decision={class_decision}，应为 nvf_fusion 或 min_u_gated")
-    if fusion_tau <= 0:
-        raise ValueError("fusion_tau 必须 > 0")
-    ood_lambda = min(max(float(ood_lambda), 0.0), 1.0)
-    print(
-        f"测试策略: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
-        f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}"
-    )
-    if class_decision == 'min_u_gated':
-        print(
-            "  [min_u_gated] 闭集：模型0 判正常→类0；否则仅在 p_yes>0.5 的故障子模型中取 u 最小者为故障类；"
-            "若全无 p_yes>0.5 则 argmax(p_yes) 定类且 OOD=1.0；其余 OOD=决策子模型 u。"
-            "（忽略 ood_score_mode/ood_lambda；fault_fusion/fusion_tau 不参与类别决策。）"
-        )
-
-    if args.checkpoint:
-        checkpoint_dir = os.path.abspath(args.checkpoint)
-    else:
-        checkpoint_dir = train_config['checkpoint_dir']
-    if not os.path.isdir(checkpoint_dir):
-        checkpoint_dir = os.path.dirname(checkpoint_dir)
-    output_dir = args.output_dir or os.path.join(checkpoint_dir, 'test')
+def evaluate_and_save_outputs(
+    all_labels,
+    all_preds,
+    all_uncertainties,
+    binary_preds_matrix,
+    closed_set_true,
+    closed_set_pred,
+    p_yes_matrix,
+    u_k_matrix,
+    logits_pos_matrix,
+    logits_neg_matrix,
+    winner_model_idx,
+    winner_p_yes,
+    winner_pos_logit,
+    winner_neg_logit,
+    sample_index,
+    known_classes,
+    unknown_classes,
+    K,
+    has_unknown_samples,
+    class_decision,
+    fault_fusion,
+    fusion_tau,
+    ood_score_mode,
+    ood_lambda,
+    uncertainty_threshold,
+    output_dir,
+):
     os.makedirs(output_dir, exist_ok=True)
-
-    known_classes = data_config['openset']['known_classes']
-    unknown_classes = data_config['openset'].get('unknown_classes', [])
-    K = len(known_classes)
-
-    backbone_type = model_config.get('type', 'ResNet18_2d_Light')
-
-    test_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=None)
-    test_loader = DataLoader(test_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-    has_unknown_samples = any([v >= K for v in test_dataset.y])
-    print(f"测试集大小: {len(test_dataset)}")
-
-    if args.test_all_epochs:
-        epochs = discover_epochs(checkpoint_dir, K)
-        if not epochs:
-            print("未找到任何 epoch 权重（需 checkpoint_dir/epochs/*/ 下 model_k.pth），请先训练并开启 save_every_epoch。")
-            return
-        print(f"全测试模式：共 {len(epochs)} 个 epoch，将依次测试并汇总到 test_results_all_epochs_nvf.csv")
-        models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
-        if args.threshold_from_val:
-            val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
-            val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-            uncertainty_threshold = compute_uncertainty_threshold_iqr(
-                val_loader,
-                models,
-                device,
-                K,
-                fault_fusion=fault_fusion,
-                fusion_tau=fusion_tau,
-                ood_score_mode=ood_score_mode,
-                ood_lambda=ood_lambda,
-                class_decision=class_decision,
-            )
-        else:
-            uncertainty_threshold = args.uncertainty_threshold
-        del models
-        all_epoch_rows = []
-        for e in epochs:
-            models_e = load_models(checkpoint_dir, K, backbone_type, device, epoch=e)
-            all_labels_e, all_preds_e, all_uncertainties_e, binary_preds_matrix_e, closed_set_true_e, closed_set_pred_e, *_ = run_test_loop(
-                models_e,
-                test_loader,
-                device,
-                K,
-                uncertainty_threshold,
-                fault_fusion=fault_fusion,
-                fusion_tau=fusion_tau,
-                ood_score_mode=ood_score_mode,
-                ood_lambda=ood_lambda,
-                class_decision=class_decision,
-            )
-            known_mask_e = all_labels_e < K
-            mapped_known_e = all_labels_e[known_mask_e]
-            known_preds_e = all_preds_e[known_mask_e]
-            acc_e = accuracy_score(mapped_known_e, known_preds_e) * 100.0
-            f1_e = auroc_e = far_e = mar_e = None
-            if has_unknown_samples:
-                true_unk = (~known_mask_e).astype(int)
-                pred_unk = (all_preds_e == -1).astype(int)
-                f1_e = f1_score(true_unk, pred_unk)
-                auroc_e = roc_auc_score(true_unk, all_uncertainties_e)
-                tp = np.sum((true_unk == 1) & (pred_unk == 1))
-                fp = np.sum((true_unk == 0) & (pred_unk == 1))
-                tn = np.sum((true_unk == 0) & (pred_unk == 0))
-                fn = np.sum((true_unk == 1) & (pred_unk == 0))
-                far_e = (fp / (fp + tn) * 100) if (fp + tn) > 0 else 0.0
-                mar_e = (fn / (tp + fn) * 100) if (tp + fn) > 0 else 0.0
-            all_epoch_rows.append({
-                'epoch': e, 'accuracy': acc_e, 'f1_score': f1_e, 'auroc': auroc_e, 'far': far_e, 'mar': mar_e
-            })
-            del models_e
-        csv_path = os.path.join(output_dir, 'test_results_all_epochs_nvf.csv')
-        with open(csv_path, 'w', encoding='utf-8') as f:
-            f.write('epoch,accuracy,f1_score,auroc,far,mar\n')
-            for r in all_epoch_rows:
-                f1_s = '' if r['f1_score'] is None else f"{r['f1_score']:.4f}"
-                auroc_s = '' if r['auroc'] is None else f"{r['auroc']:.4f}"
-                far_s = '' if r['far'] is None else f"{r['far']:.2f}"
-                mar_s = '' if r['mar'] is None else f"{r['mar']:.2f}"
-                f.write(f"{r['epoch']},{r['accuracy']:.2f},{f1_s},{auroc_s},{far_s},{mar_s}\n")
-        print(f"全 epoch 测试结果已保存: {csv_path}")
-
-    models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
-    if args.threshold_from_val:
-        val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
-        val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
-        uncertainty_threshold = compute_uncertainty_threshold_iqr(
-            val_loader,
-            models,
-            device,
-            K,
-            fault_fusion=fault_fusion,
-            fusion_tau=fusion_tau,
-            ood_score_mode=ood_score_mode,
-            ood_lambda=ood_lambda,
-            class_decision=class_decision,
-        )
-        print(f"由已知类测试子集 IQR 得到不确定性阈值: {uncertainty_threshold:.4f}")
-    else:
-        uncertainty_threshold = args.uncertainty_threshold
-        print(f"阈值 (u > 此值判 OOD): {uncertainty_threshold}")
-
-    all_labels, all_preds, all_uncertainties, binary_preds_matrix, closed_set_true, closed_set_pred, p_yes_matrix, u_k_matrix, logits_pos_matrix, logits_neg_matrix = run_test_loop(
-        models,
-        test_loader,
-        device,
-        K,
-        uncertainty_threshold,
-        fault_fusion=fault_fusion,
-        fusion_tau=fusion_tau,
-        ood_score_mode=ood_score_mode,
-        ood_lambda=ood_lambda,
-        class_decision=class_decision,
-    )
-
     known_mask = all_labels < K
     unknown_mask = ~known_mask
     id_unc = all_uncertainties[known_mask]
@@ -594,18 +532,13 @@ def main():
     mapped_known_labels = all_labels[known_mask]
     known_preds_mapped = all_preds[known_mask]
     if len(mapped_known_labels) == 0:
-        print("错误: 没有有效的已知类样本")
-        return
+        raise RuntimeError("没有有效的已知类样本")
 
     accuracy = accuracy_score(mapped_known_labels, known_preds_mapped)
-    print(f"已知类准确率 (Closed-set Accuracy): {accuracy * 100:.2f}%")
 
-    # 二分类模型评估（按 NvF 逻辑）
     known_idx = np.where(known_mask)[0]
     binary_accuracies = []
     binary_conf_info = []
-
-    # 模型 0: Normal vs All Faults
     true_0 = (all_labels[known_idx] == 0).astype(np.int32)
     pred_0 = binary_preds_matrix[known_idx, 0]
     acc_0 = accuracy_score(true_0, pred_0)
@@ -623,8 +556,6 @@ def main():
             binary_accuracies.append(acc_k)
             title_k = f"Model {k} (Normal vs Fault {k} [{known_classes[k]}])"
             binary_conf_info.append({'model_idx': k, 'true': true_k, 'pred': pred_k, 'title': title_k})
-
-    print(f"平均二分类准确率: {np.mean(binary_accuracies) * 100:.2f}%")
 
     if len(binary_conf_info) > 0:
         plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -662,7 +593,6 @@ def main():
         plt.savefig(os.path.join(output_dir, 'confusion_matrix_binary_all_models_nvf.png'), dpi=150)
         plt.close()
 
-    # 闭集混淆矩阵（仅已知类，忽略 OOD 判别）
     if len(closed_set_true) > 0:
         cm_closed = confusion_matrix(closed_set_true, closed_set_pred, labels=np.arange(K))
         row_sum_closed = cm_closed.sum(axis=1, keepdims=True)
@@ -689,14 +619,12 @@ def main():
         plt.savefig(os.path.join(output_dir, 'confusion_matrix_closed.png'), dpi=150)
         plt.close()
 
-    # 全集混淆矩阵（已知类 + Unknown，使用 EDL mean 阈值辅助 OOD 判别）
     label_names = [str(c) for c in known_classes] + ['Unknown']
     cm_labels = []
     cm_preds = []
     for true_label, pred_label in zip(all_labels, all_preds):
         true_label = int(true_label)
         pred_label = int(pred_label)
-
         cm_labels.append(true_label if true_label < K else K)
         cm_preds.append(pred_label if 0 <= pred_label < K else K)
 
@@ -707,7 +635,6 @@ def main():
         row_sum = cm.sum(axis=1, keepdims=True)
         cm_pct = np.where(row_sum > 0, cm.astype(float) / row_sum * 100, 0)
         annot = np.array([[f'{cm_pct[i, j]:.1f}%' for j in range(cm_pct.shape[1])] for i in range(cm_pct.shape[0])])
-
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
         plt.figure(figsize=(10, 8))
@@ -719,21 +646,18 @@ def main():
         plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'), dpi=150)
         plt.close()
 
+    f1 = auroc = far = mar = None
     if has_unknown_samples:
         true_is_unknown = (~known_mask).astype(int)
         pred_is_unknown = (all_preds == -1).astype(int)
         f1 = f1_score(true_is_unknown, pred_is_unknown)
-        print(f"F1-Score (检测未知类): {f1:.4f}")
         auroc = roc_auc_score(true_is_unknown, all_uncertainties)
-        print(f"AUROC (区分已知/未知): {auroc:.4f}")
         tp = np.sum((true_is_unknown == 1) & (pred_is_unknown == 1))
         fp = np.sum((true_is_unknown == 0) & (pred_is_unknown == 1))
         tn = np.sum((true_is_unknown == 0) & (pred_is_unknown == 0))
         fn = np.sum((true_is_unknown == 1) & (pred_is_unknown == 0))
         far = (fp / (fp + tn) * 100) if (fp + tn) > 0 else 0.0
         mar = (fn / (tp + fn) * 100) if (tp + fn) > 0 else 0.0
-        print(f"FAR (虚警率): {far:.2f}%")
-        print(f"MAR (漏警率): {mar:.2f}%")
         fpr, tpr, _ = roc_curve(true_is_unknown, all_uncertainties)
         plt.figure()
         plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {auroc:.2f})')
@@ -747,10 +671,8 @@ def main():
         plt.savefig(os.path.join(output_dir, 'roc_curve_nvf.png'), dpi=150)
         plt.close()
 
-        # 不确定度分布图：ID vs OOD（NvF，使用 mean u_k），配色与 old 版本保持一致
         with plt.style.context('default'):
             plt.figure(figsize=(8, 6))
-            # 与 old test.py 保持一致：使用 matplotlib 默认配色与参数
             plt.hist(id_unc, bins=30, alpha=0.6, label='ID', density=True)
             if ood_unc is not None and len(ood_unc) > 0:
                 plt.hist(ood_unc, bins=30, alpha=0.6, label='OOD', density=True)
@@ -764,6 +686,461 @@ def main():
             plt.tight_layout()
             plt.savefig(os.path.join(output_dir, 'uncertainty_distribution_mean_nvf.png'), dpi=150)
             plt.close()
+
+    # OOD 样本级分析表（仅未知类）
+    ood_analysis_path = os.path.join(output_dir, 'ood_uncertainty_analysis_nvf.csv')
+    with open(ood_analysis_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'sample_index',
+            'true_label_idx',
+            'true_label_name',
+            'pred_label_idx',
+            'pred_label_name',
+            'winner_model_idx',
+            'winner_p_yes',
+            'winner_pos_logit',
+            'winner_neg_logit',
+            'ood_score',
+            'ood_threshold',
+            'is_rejected_as_unknown',
+        ])
+        if has_unknown_samples:
+            ood_idx = np.where(unknown_mask)[0]
+            for i in ood_idx:
+                t_idx = int(all_labels[i])
+                p_idx = int(all_preds[i])
+                w_idx = int(winner_model_idx[i])
+                t_name = unknown_classes[t_idx - K] if 0 <= (t_idx - K) < len(unknown_classes) else f'Unknown_{t_idx}'
+                p_name = 'Unknown' if p_idx < 0 or p_idx >= K else str(known_classes[p_idx])
+                writer.writerow([
+                    int(sample_index[i]),
+                    t_idx,
+                    t_name,
+                    p_idx,
+                    p_name,
+                    w_idx,
+                    float(winner_p_yes[i]),
+                    float(winner_pos_logit[i]),
+                    float(winner_neg_logit[i]),
+                    float(all_uncertainties[i]),
+                    float(uncertainty_threshold),
+                    int(p_idx < 0),
+                ])
+
+    # ID 样本级分析表（仅已知类）
+    id_analysis_path = os.path.join(output_dir, 'id_uncertainty_analysis_nvf.csv')
+    with open(id_analysis_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'sample_index',
+            'true_label_idx',
+            'true_label_name',
+            'pred_label_idx',
+            'pred_label_name',
+            'winner_model_idx',
+            'winner_p_yes',
+            'winner_pos_logit',
+            'winner_neg_logit',
+            'ood_score',
+            'ood_threshold',
+            'is_rejected_as_unknown',
+        ])
+        id_idx = np.where(known_mask)[0]
+        for i in id_idx:
+            t_idx = int(all_labels[i])
+            p_idx = int(all_preds[i])
+            w_idx = int(winner_model_idx[i])
+            t_name = str(known_classes[t_idx]) if 0 <= t_idx < K else f'Class_{t_idx}'
+            p_name = 'Unknown' if p_idx < 0 or p_idx >= K else str(known_classes[p_idx])
+            writer.writerow([
+                int(sample_index[i]),
+                t_idx,
+                t_name,
+                p_idx,
+                p_name,
+                w_idx,
+                float(winner_p_yes[i]),
+                float(winner_pos_logit[i]),
+                float(winner_neg_logit[i]),
+                float(all_uncertainties[i]),
+                float(uncertainty_threshold),
+                int(p_idx < 0),
+            ])
+
+    has_ood_row = np.any(all_labels >= K)
+    if p_yes_matrix.size > 0:
+        hard_preds = (p_yes_matrix > 0.5).astype(np.float32)
+        pref_matrix, pref_rows = compute_class_model_stats(
+            hard_preds, all_labels, K, has_ood_row, reduce='mean'
+        )
+        plot_class_model_heatmap(
+            pref_matrix, pref_rows, K,
+            title='Per-model Positive Prediction Ratio (NvF, %)',
+            cbar_label='Ratio (%)',
+            filename='per_model_class_preference_matrix_nvf.png',
+            output_dir=output_dir,
+            fmt='.1f',
+            cmap='Blues',
+            annotate=True,
+            value_scale=100.0,
+            vmin=0.0,
+            vmax=100.0,
+        )
+
+    if u_k_matrix.size > 0:
+        uk_stats, uk_rows = compute_class_model_stats(
+            u_k_matrix, all_labels, K, has_ood_row, reduce='mean'
+        )
+        unc_vals = uk_stats.reshape(-1)
+        if unc_vals.size > 0:
+            unc_vmin = float(np.percentile(unc_vals, 5))
+            unc_vmax = float(np.percentile(unc_vals, 95))
+            if unc_vmax <= unc_vmin:
+                unc_vmin, unc_vmax = None, None
+        else:
+            unc_vmin, unc_vmax = None, None
+        plot_class_model_heatmap(
+            uk_stats, uk_rows, K,
+            title='Class-Model Mean EDL Uncertainty u_k (NvF)',
+            cbar_label='mean u_k',
+            filename='per_model_uncertainty_uk_nvf.png',
+            output_dir=output_dir,
+            fmt='.3f',
+            cmap='mako',
+            annotate=True,
+            vmin=unc_vmin,
+            vmax=unc_vmax,
+        )
+
+    if logits_pos_matrix.size > 0 and logits_neg_matrix.size > 0:
+        logits_pos_stats, logits_rows = compute_class_model_stats(
+            logits_pos_matrix, all_labels, K, has_ood_row, reduce='mean'
+        )
+        logits_neg_stats, _ = compute_class_model_stats(
+            logits_neg_matrix, all_labels, K, has_ood_row, reduce='mean'
+        )
+        logits_range = np.concatenate([logits_pos_stats.reshape(-1), logits_neg_stats.reshape(-1)], axis=0)
+        if logits_range.size > 0:
+            logits_vmin = float(np.percentile(logits_range, 5))
+            logits_vmax = float(np.percentile(logits_range, 95))
+            if logits_vmax <= logits_vmin:
+                logits_vmin, logits_vmax = None, None
+        else:
+            logits_vmin, logits_vmax = None, None
+
+        plot_class_model_heatmap(
+            logits_pos_stats, logits_rows, K,
+            title='Class-Model Mean Positive Logits (NvF)',
+            cbar_label='mean logits_pos',
+            filename='per_model_logits_pos_nvf.png',
+            output_dir=output_dir,
+            fmt='.2f',
+            cmap='rocket',
+            annotate=True,
+            vmin=logits_vmin,
+            vmax=logits_vmax,
+        )
+        plot_class_model_heatmap(
+            logits_neg_stats, logits_rows, K,
+            title='Class-Model Mean Negative Logits (NvF)',
+            cbar_label='mean logits_neg',
+            filename='per_model_logits_neg_nvf.png',
+            output_dir=output_dir,
+            fmt='.2f',
+            cmap='rocket',
+            annotate=True,
+            vmin=logits_vmin,
+            vmax=logits_vmax,
+        )
+
+    results_path = os.path.join(output_dir, 'binary_test_results.txt')
+    with open(results_path, 'w', encoding='utf-8') as f:
+        f.write(f"Closed-set Accuracy: {accuracy * 100:.2f}%\n")
+        f.write(
+            f"Strategy: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+            f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}\n"
+        )
+        f.write(f"OOD Threshold: {uncertainty_threshold:.6f}\n")
+        f.write(f"Average Binary Accuracy: {np.mean(binary_accuracies) * 100:.2f}%\n")
+        if f1 is not None:
+            f.write(f"F1-Score (Unknown Detection): {f1:.4f}\n")
+            f.write(f"AUROC (ID vs OOD): {auroc:.4f}\n")
+            f.write(f"FAR: {far:.2f}%\n")
+            f.write(f"MAR: {mar:.2f}%\n")
+
+    return {
+        "accuracy": accuracy * 100.0,
+        "avg_binary_acc": float(np.mean(binary_accuracies) * 100.0),
+        "f1_score": f1,
+        "auroc": auroc,
+        "far": far,
+        "mar": mar,
+        "results_path": results_path,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：仅使用 EDL mean 不确定度的测试脚本')
+    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
+    parser.add_argument('--checkpoint', type=str, default=None)
+    parser.add_argument('--test_all_epochs', '--all', action='store_true', dest='test_all_epochs')
+    parser.add_argument('--uncertainty_threshold', '--uncertainty', type=float, default=0.5, dest='uncertainty_threshold')
+    parser.add_argument('--threshold_from_val', action='store_true')
+    parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--fault_fusion', type=str, default=None, choices=['legacy', 'softmax'])
+    parser.add_argument('--fusion_tau', type=float, default=None)
+    parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models', 'winner_only', 'winner_pos_only'])
+    parser.add_argument('--ood_lambda', type=float, default=None)
+    parser.add_argument('--class_decision', type=str, default=None, choices=['nvf_fusion', 'min_u_gated'])
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    data_config = config['data']
+    model_config = config['model']
+    train_config = config['train']
+
+    ensemble_strategy = train_config.get('ensemble_strategy', 'Normal_vs_Fault_i')
+    if ensemble_strategy != 'Normal_vs_Fault_i':
+        print(f"警告：配置中的 ensemble_strategy={ensemble_strategy}，但 test_NvF.py 仅支持 Normal_vs_Fault_i，将按该策略解释结果。")
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+
+    test_infer_cfg = train_config.get('test_infer', {})
+    fault_fusion = args.fault_fusion if args.fault_fusion is not None else test_infer_cfg.get('fault_fusion', 'legacy')
+    fusion_tau = args.fusion_tau if args.fusion_tau is not None else float(test_infer_cfg.get('fusion_tau', 1.0))
+    ood_score_mode = args.ood_score_mode if args.ood_score_mode is not None else test_infer_cfg.get('ood_score_mode', 'mean_all')
+    ood_lambda = args.ood_lambda if args.ood_lambda is not None else float(test_infer_cfg.get('ood_lambda', 0.5))
+    class_decision = args.class_decision if args.class_decision is not None else test_infer_cfg.get('class_decision', 'nvf_fusion')
+    if class_decision not in ('nvf_fusion', 'min_u_gated'):
+        raise ValueError(f"不支持的 class_decision={class_decision}，应为 nvf_fusion 或 min_u_gated")
+    if fusion_tau <= 0:
+        raise ValueError("fusion_tau 必须 > 0")
+    ood_lambda = min(max(float(ood_lambda), 0.0), 1.0)
+    print(
+        f"测试策略: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
+        f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}"
+    )
+    if class_decision == 'min_u_gated':
+        print(
+            "  [min_u_gated] 闭集：模型0 判正常→类0；否则仅在 p_yes>0.5 的故障子模型中取 u 最小者为故障类；"
+            "若全无 p_yes>0.5 则 argmax(p_yes) 定类且 OOD=1.0；其余 OOD=决策子模型 u。"
+            "（fault_fusion/fusion_tau 不参与类别决策。若 ood_score_mode=winner_pos_only，"
+            "则按闭集预测模型计算 pos-only 不确定度；否则沿用门控路径 OOD 分数。）"
+        )
+
+    if args.checkpoint:
+        checkpoint_dir = os.path.abspath(args.checkpoint)
+    else:
+        checkpoint_dir = train_config['checkpoint_dir']
+    if not os.path.isdir(checkpoint_dir):
+        checkpoint_dir = os.path.dirname(checkpoint_dir)
+    output_dir = args.output_dir or os.path.join(checkpoint_dir, 'test')
+    os.makedirs(output_dir, exist_ok=True)
+
+    known_classes = data_config['openset']['known_classes']
+    unknown_classes = data_config['openset'].get('unknown_classes', [])
+    K = len(known_classes)
+
+    backbone_type = model_config.get('type', 'ResNet18_2d_Light')
+
+    test_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=None)
+    test_loader = DataLoader(test_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
+    has_unknown_samples = any([v >= K for v in test_dataset.y])
+    print(f"测试集大小: {len(test_dataset)}")
+
+    test_all_epochs_default = bool(test_infer_cfg.get('test_all_epochs', False))
+    run_test_all_epochs = bool(args.test_all_epochs or test_all_epochs_default)
+    if run_test_all_epochs:
+        epochs = discover_epochs(checkpoint_dir, K)
+        if not epochs:
+            print("未找到任何 epoch 权重（需 checkpoint_dir/epochs/*/ 下 model_k.pth），请先训练并开启 save_every_epoch。")
+            return
+        print(f"全测试模式：共 {len(epochs)} 个 epoch，将依次测试并汇总到 test_results_all_epochs_nvf.csv")
+        models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
+        if args.threshold_from_val:
+            val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
+            val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
+            uncertainty_threshold = compute_uncertainty_threshold_iqr(
+                val_loader,
+                models,
+                device,
+                K,
+                fault_fusion=fault_fusion,
+                fusion_tau=fusion_tau,
+                ood_score_mode=ood_score_mode,
+                ood_lambda=ood_lambda,
+                class_decision=class_decision,
+            )
+        else:
+            uncertainty_threshold = args.uncertainty_threshold
+        del models
+        all_epoch_rows = []
+        all_epoch_plot_root = os.path.join(output_dir, 'epochs')
+        os.makedirs(all_epoch_plot_root, exist_ok=True)
+        for e in epochs:
+            models_e = load_models(checkpoint_dir, K, backbone_type, device, epoch=e)
+            all_labels_e, all_preds_e, all_uncertainties_e, binary_preds_matrix_e, closed_set_true_e, closed_set_pred_e, p_yes_matrix_e, u_k_matrix_e, logits_pos_matrix_e, logits_neg_matrix_e, winner_model_idx_e, winner_p_yes_e, winner_pos_logit_e, winner_neg_logit_e, sample_index_e = run_test_loop(
+                models_e,
+                test_loader,
+                device,
+                K,
+                uncertainty_threshold,
+                fault_fusion=fault_fusion,
+                fusion_tau=fusion_tau,
+                ood_score_mode=ood_score_mode,
+                ood_lambda=ood_lambda,
+                class_decision=class_decision,
+            )
+            epoch_output_dir = os.path.join(all_epoch_plot_root, str(e))
+            metrics_e = evaluate_and_save_outputs(
+                all_labels=all_labels_e,
+                all_preds=all_preds_e,
+                all_uncertainties=all_uncertainties_e,
+                binary_preds_matrix=binary_preds_matrix_e,
+                closed_set_true=closed_set_true_e,
+                closed_set_pred=closed_set_pred_e,
+                p_yes_matrix=p_yes_matrix_e,
+                u_k_matrix=u_k_matrix_e,
+                logits_pos_matrix=logits_pos_matrix_e,
+                logits_neg_matrix=logits_neg_matrix_e,
+                winner_model_idx=winner_model_idx_e,
+                winner_p_yes=winner_p_yes_e,
+                winner_pos_logit=winner_pos_logit_e,
+                winner_neg_logit=winner_neg_logit_e,
+                sample_index=sample_index_e,
+                known_classes=known_classes,
+                unknown_classes=unknown_classes,
+                K=K,
+                has_unknown_samples=has_unknown_samples,
+                class_decision=class_decision,
+                fault_fusion=fault_fusion,
+                fusion_tau=fusion_tau,
+                ood_score_mode=ood_score_mode,
+                ood_lambda=ood_lambda,
+                uncertainty_threshold=uncertainty_threshold,
+                output_dir=epoch_output_dir,
+            )
+            all_epoch_rows.append({
+                'epoch': e,
+                'accuracy': metrics_e['accuracy'],
+                'f1_score': metrics_e['f1_score'],
+                'auroc': metrics_e['auroc'],
+                'far': metrics_e['far'],
+                'mar': metrics_e['mar'],
+            })
+            del models_e
+        csv_path = os.path.join(output_dir, 'test_results_all_epochs_nvf.csv')
+        with open(csv_path, 'w', encoding='utf-8') as f:
+            f.write('epoch,accuracy,f1_score,auroc,far,mar\n')
+            for r in all_epoch_rows:
+                f1_s = '' if r['f1_score'] is None else f"{r['f1_score']:.4f}"
+                auroc_s = '' if r['auroc'] is None else f"{r['auroc']:.4f}"
+                far_s = '' if r['far'] is None else f"{r['far']:.2f}"
+                mar_s = '' if r['mar'] is None else f"{r['mar']:.2f}"
+                f.write(f"{r['epoch']},{r['accuracy']:.2f},{f1_s},{auroc_s},{far_s},{mar_s}\n")
+        print(f"全 epoch 测试结果已保存: {csv_path}")
+        # best epoch: 先按 accuracy 选，若并列则取 auroc 更高者
+        best_row = None
+        for r in all_epoch_rows:
+            if best_row is None:
+                best_row = r
+                continue
+            cur_auroc = -1.0 if r['auroc'] is None else float(r['auroc'])
+            best_auroc = -1.0 if best_row['auroc'] is None else float(best_row['auroc'])
+            if (float(r['accuracy']) > float(best_row['accuracy'])) or (
+                float(r['accuracy']) == float(best_row['accuracy']) and cur_auroc > best_auroc
+            ):
+                best_row = r
+        if best_row is not None:
+            best_src = os.path.join(all_epoch_plot_root, str(best_row['epoch']))
+            best_dst = os.path.join(output_dir, 'best_epoch')
+            if os.path.isdir(best_dst):
+                shutil.rmtree(best_dst)
+            shutil.copytree(best_src, best_dst)
+            with open(os.path.join(output_dir, 'best_epoch.txt'), 'w', encoding='utf-8') as f:
+                f.write(f"best_epoch={best_row['epoch']}\n")
+                f.write(f"accuracy={best_row['accuracy']:.2f}\n")
+                if best_row['f1_score'] is not None:
+                    f.write(f"f1_score={best_row['f1_score']:.4f}\n")
+                if best_row['auroc'] is not None:
+                    f.write(f"auroc={best_row['auroc']:.4f}\n")
+                if best_row['far'] is not None:
+                    f.write(f"far={best_row['far']:.2f}\n")
+                if best_row['mar'] is not None:
+                    f.write(f"mar={best_row['mar']:.2f}\n")
+            print(f"best epoch={best_row['epoch']}，完整图已复制到: {best_dst}")
+
+    models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
+    if args.threshold_from_val:
+        val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
+        val_loader = DataLoader(val_dataset, batch_size=train_config.get('batch_size', 32), shuffle=False)
+        uncertainty_threshold = compute_uncertainty_threshold_iqr(
+            val_loader,
+            models,
+            device,
+            K,
+            fault_fusion=fault_fusion,
+            fusion_tau=fusion_tau,
+            ood_score_mode=ood_score_mode,
+            ood_lambda=ood_lambda,
+            class_decision=class_decision,
+        )
+        print(f"由已知类测试子集 IQR 得到不确定性阈值: {uncertainty_threshold:.4f}")
+    else:
+        uncertainty_threshold = args.uncertainty_threshold
+        print(f"阈值 (u > 此值判 OOD): {uncertainty_threshold}")
+
+    all_labels, all_preds, all_uncertainties, binary_preds_matrix, closed_set_true, closed_set_pred, p_yes_matrix, u_k_matrix, logits_pos_matrix, logits_neg_matrix, winner_model_idx, winner_p_yes, winner_pos_logit, winner_neg_logit, sample_index = run_test_loop(
+        models,
+        test_loader,
+        device,
+        K,
+        uncertainty_threshold,
+        fault_fusion=fault_fusion,
+        fusion_tau=fusion_tau,
+        ood_score_mode=ood_score_mode,
+        ood_lambda=ood_lambda,
+        class_decision=class_decision,
+    )
+
+    metrics = evaluate_and_save_outputs(
+        all_labels=all_labels,
+        all_preds=all_preds,
+        all_uncertainties=all_uncertainties,
+        binary_preds_matrix=binary_preds_matrix,
+        closed_set_true=closed_set_true,
+        closed_set_pred=closed_set_pred,
+        p_yes_matrix=p_yes_matrix,
+        u_k_matrix=u_k_matrix,
+        logits_pos_matrix=logits_pos_matrix,
+        logits_neg_matrix=logits_neg_matrix,
+        winner_model_idx=winner_model_idx,
+        winner_p_yes=winner_p_yes,
+        winner_pos_logit=winner_pos_logit,
+        winner_neg_logit=winner_neg_logit,
+        sample_index=sample_index,
+        known_classes=known_classes,
+        unknown_classes=unknown_classes,
+        K=K,
+        has_unknown_samples=has_unknown_samples,
+        class_decision=class_decision,
+        fault_fusion=fault_fusion,
+        fusion_tau=fusion_tau,
+        ood_score_mode=ood_score_mode,
+        ood_lambda=ood_lambda,
+        uncertainty_threshold=uncertainty_threshold,
+        output_dir=output_dir,
+    )
+    print(f"已知类准确率 (Closed-set Accuracy): {metrics['accuracy']:.2f}%")
+    print(f"平均二分类准确率: {metrics['avg_binary_acc']:.2f}%")
+    if metrics['f1_score'] is not None:
+        print(f"F1-Score (检测未知类): {metrics['f1_score']:.4f}")
+        print(f"AUROC (区分已知/未知): {metrics['auroc']:.4f}")
+        print(f"FAR (虚警率): {metrics['far']:.2f}%")
+        print(f"MAR (漏警率): {metrics['mar']:.2f}%")
+    print(f"结果摘要已保存: {metrics['results_path']}")
 
     # ====== NvF: 矩阵化可视化：故障类型 × 子模型 ======
     has_ood_row = np.any(all_labels >= K)
@@ -870,18 +1247,6 @@ def main():
             vmin=logits_vmin,
             vmax=logits_vmax,
         )
-
-    results_path = os.path.join(output_dir, 'binary_test_results.txt')
-    with open(results_path, 'w', encoding='utf-8') as f:
-        f.write(f"Closed-set Accuracy: {accuracy * 100:.2f}%\n")
-        f.write(
-            f"Strategy: class_decision={class_decision}, fault_fusion={fault_fusion}, fusion_tau={fusion_tau:.4f}, "
-            f"ood_score_mode={ood_score_mode}, ood_lambda={ood_lambda:.4f}\n"
-        )
-        f.write(f"OOD Threshold: {uncertainty_threshold:.6f}\n")
-        f.write(f"Average Binary Accuracy: {np.mean(binary_accuracies) * 100:.2f}%\n")
-    print(f"结果摘要已保存: {results_path}")
-
 
 if __name__ == '__main__':
     main()

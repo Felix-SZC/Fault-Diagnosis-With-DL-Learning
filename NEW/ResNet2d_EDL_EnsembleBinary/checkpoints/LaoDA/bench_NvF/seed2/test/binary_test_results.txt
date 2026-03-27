@@ -1,4 +1,4 @@
-Closed-set Accuracy: 54.14%
-Strategy: fault_fusion=softmax, fusion_tau=1.0000, ood_score_mode=key_models, ood_lambda=0.5000
-OOD Threshold: 0.500000
+Closed-set Accuracy: 49.07%
+Strategy: class_decision=min_u_gated, fault_fusion=softmax, fusion_tau=1.0000, ood_score_mode=key_models, ood_lambda=0.5000
+OOD Threshold: 0.066291
 Average Binary Accuracy: 99.79%

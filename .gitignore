@@ -41,3 +41,4 @@ samples_data.csv
 **/*.pth
 **/*.pth.tar
 *.pth
+*.txt

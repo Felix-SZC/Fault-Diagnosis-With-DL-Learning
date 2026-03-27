@@ -1,0 +1,126 @@
+# =========================================================
+# NvF 联合微调：提升“错专家”不确定度
+#
+# 核心思想：
+# - 先用 train_nvf.py 得到 K 个 NvF 子模型（k=0: 正常vs全故障；k>=1: 正常vs故障k）
+# - 再用联合微调脚本同时加载 K 个子模型，在同一 batch 上训练：
+#   L_total = L_base + lambda_unc * L_unc
+#   - L_base: 原本每个子模型的 EDL 二分类损失（保持原有判别能力）
+#   - L_unc: 匹配专家低不确定度 + 错专家高不确定度
+#
+# 推荐运行顺序:
+#   1) python train_nvf.py --config configs/bench_NvF_LaoDA.yaml
+#   2) python train_nvf_joint_uncertainty.py --config configs/bench_NvF_LaoDA_joint_uncertainty.yaml
+#   3) python test_NvF.py --config configs/bench_NvF_LaoDA_joint_uncertainty.yaml --checkpoint checkpoints/LaoDA/bench_NvF_joint_unc/seed2 --threshold_from_val
+# =========================================================
+
+data:
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+    unknown_classes:
+      - '7齿轮断齿'
+      - '9齿轮缺齿'
+
+model:
+  type: 'LaoDA'
+
+train:
+  model_indices: 'all'
+  num_epochs: 200
+  batch_size: 256
+  learning_rate: 0.0005
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_joint_unc/seed2'
+  save_every_epoch: true
+  notes: 'Joint finetune for NvF: raise wrong-expert uncertainty'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 180
+  kl_weight: 1.0
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0005
+  scheduler:
+    use_scheduler: false
+    scheduler_type: 'StepLR'
+    step_size: 60
+    gamma: 0.1
+  ensemble_strategy: 'Normal_vs_Fault_i'
+
+  joint_finetune:
+    # train_nvf.py 产出的 baseline 子模型目录（输入）
+    input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF/seed2'
+    # true: 仅训练分类头（LaoDA 默认仅 fc2）；false: 全量参数联合微调
+    head_only: false
+    # 仅在 LaoDA + head_only=true 时生效：
+    # false: 只训 fc2；true: 训练 fc1+fc2
+    train_fc1: false
+
+    # 总损失：L_total = L_base + lambda_unc * L_unc
+    # lambda_unc 越大，越强调“错专家高不确定度”，但过大可能损伤 OOD AUROC
+    lambda_unc: 0.2
+    # 前 warmup_epochs 轮仅优化 L_base（不加联合项）
+    warmup_epochs: 20
+    # warmup 后，在 ramp_epochs 内线性将 lambda 从 0 拉到 lambda_unc
+    ramp_epochs: 20
+
+    # 错专家不确定度项（L_unc 的 wrong 部分）
+    # margin: max(0, u_margin - u_wrong)，只惩罚“不够高”的不确定度（更稳）
+    # target1: (1 - u_wrong)^2，直接逼近 1（更激进）
+    wrong_mode: 'margin'  # margin | target1
+    # 仅 wrong_mode=margin 生效：错专家不确定度目标下限
+    # 建议范围：0.7~0.9；太高可能导致模型过保守
+    u_margin: 0.8
+    # 匹配专家项权重（降低 u_match）
+    match_weight: 1.0
+    # 错专家项权重（抬高 u_wrong）
+    wrong_weight: 1.0
+
+    # 调试/快速试验：每个 epoch 最多用多少个 batch；0 表示使用全部 batch
+    max_batches_per_epoch: 0
+
+  test_infer:
+    # 闭集类别决策方式：
+    # - nvf_fusion: 使用 NvF 融合分数 final_probs.argmax
+    # - min_u_gated: 先用 model_0 判正常/故障，再在故障子模型里优先选低不确定度
+    # 建议联合微调后先用 min_u_gated，更直接观察“错专家不确定度抬高”是否有效
+    class_decision: 'min_u_gated'  # nvf_fusion | min_u_gated
+
+    # 仅在 class_decision=nvf_fusion 时参与“故障分支融合”：
+    # - legacy: 直接用各 fault 子模型 p_yes 作为故障分支权重
+    # - softmax: 对 fault 子模型分数做 softmax 后再融合
+    # min_u_gated 下此项不参与闭集类别决策
+    fault_fusion: 'legacy'
+
+    # fault_fusion=softmax 时的温度参数：
+    # - 较小（<1）: 分布更尖锐，更偏向单个高分 fault 子模型
+    # - 较大（>1）: 分布更平滑，降低单模型主导
+    # min_u_gated 下此项不参与闭集类别决策
+    fusion_tau: 0.5
+
+    # OOD 分数聚合方式：
+    # - winner_only: 用最终胜出故障子模型的 u（u=2/S）
+    # - key_models: 线性组合 u0 与 u_winner（权重由 ood_lambda 指定）
+    # - mean_all: 全部子模型 u 的平均
+    # - winner_pos_only: 先按闭集最终预测得到 winner 模型，再仅用该模型的 pos-only 不确定度
+    #   score = 2 / (alpha_pos_winner + 1)
+    # 说明：
+    # - class_decision=nvf_fusion: 以上四种均可用
+    # - class_decision=min_u_gated: 默认走门控 OOD 分数；若设 winner_pos_only 会覆盖为上述 pos-only 规则
+    ood_score_mode: 'winner_pos_only'
+
+    # 仅当 ood_score_mode=key_models 时生效：
+    # score = ood_lambda * u0 + (1-ood_lambda) * u_winner
+    # min_u_gated 下被忽略
+    ood_lambda: 1.0
+    # 是否默认测试每个 epoch（等价于命令行加 --test_all_epochs）
+    # 依赖训练阶段开启 train.save_every_epoch=true
+    test_all_epochs: false
+
