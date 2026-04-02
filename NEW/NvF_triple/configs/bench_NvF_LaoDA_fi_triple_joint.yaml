@@ -1,0 +1,86 @@
+# =========================================================
+# Fi-only NvF · 阶段二（联合微调，三态监督，无 model0）
+# =========================================================
+# 脚本: train_nvf_fi_joint.py
+# 前提: 已用 bench_NvF_LaoDA_fi_triple.yaml 完成阶段一，且 fi_joint_finetune.input_checkpoint_dir
+#       下存在 model_1.pth .. model_{K-1}.pth。
+# 数据: 全闭集 batch（与 train 相同 known_classes）；对每个 fault 头 k：
+#       正常 -> 目标 [1,0]；第 k 类故障 -> [0,1]；其余已知类（含其它故障）-> [0,0]。
+# 损失: 仅三态 EDL-MSE（见 nvf_fi_triple_common.fi_triple_edl_mse_loss），各头平均；无 L_unc/L_neg。
+# 输出: checkpoint_dir 下 model_1..model_{K-1}.pth；save_every_epoch 时另有 epochs/<e>/。
+# 训练过程: fi_stage2_training_flow.png（流程图）；training_curves_fi_joint.png 与 joint_history.csv 每个 epoch 更新（便于实时打开预览）。
+# 实时窗口: python train_nvf_fi_joint.py --config 本文件 --live-plot（需本机图形界面）。
+# 测试: test_NvF_fi_triple.py --config 本文件 [--checkpoint 目录] [--threshold_from_val]
+# # 阶段一
+# python train_nvf_fi_triple.py --config configs/bench_NvF_LaoDA_fi_triple.yaml
+
+# # 阶段二
+# python train_nvf_fi_joint.py --config configs/bench_NvF_LaoDA_fi_triple_joint.yaml
+
+# # 测试（阶段二权重 + joint 配置）
+# python test_NvF_fi_triple.py --config configs/bench_NvF_LaoDA_fi_triple_joint.yaml --threshold_from_val
+# =========================================================
+
+data:
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+      - '9齿轮缺齿'
+    unknown_classes:
+      - '7齿轮断齿'
+
+model:
+  type: 'LaoDA'
+
+train:
+  num_epochs: 300
+  batch_size: 256
+  # 联合微调常用略小于阶段一，可按验证集调整
+  learning_rate: 0.0001
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_7/stage2_joint'
+  save_every_epoch: true
+  edl_loss_type: 'mse'
+  edl_annealing_step: 200
+  kl_weight: 1.0
+  device: 'cuda'
+  optimizer: 'Adam'
+  weight_decay: 0.0005
+  seed: 42
+  scheduler:
+    use_scheduler: false
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
+
+  # ---------- 阶段二专用（train_nvf_fi_joint 读取）----------
+  fi_joint_finetune:
+    # 阶段一权重目录（需含 model_1.pth .. model_{K-1}.pth）
+    input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_7/stage1'
+    # true: 仅训分类头（LaoDA 默认 fc2）；false: 全网络
+    head_only: false
+    # 仅 LaoDA 且 head_only=true 时：是否连 fc1 一起训
+    train_fc1: false
+    # 三态样本在 loss 内的常数权重（按头内：正常/本类故障/其它故障）
+    w_normal: 1.0
+    w_fault: 1.0
+    w_other: 1.0
+    # true: 监督为 [0,0] 的样本不施加 KL 项（仅保留 loglikelihood 项），减轻与 EDL 先验冲突
+    zero_kl_for_other_fault: false
+    # >0 时每个 epoch 只用前 N 个 batch（调试）；0 表示全量
+    max_batches_per_epoch: 0
+
+  test_infer:
+    fi_tau_normal: 0.5
+    fi_tau_fault: 0.5
+    # true: test_NvF_fi_triple 默认逐 epoch 测并写 test_results_all_epochs_fi.csv、best_epoch
+    test_all_epochs: fals
+    # 可选：只测部分 epoch（语法同命令行 --test_epochs）；不配则测全部已保存 epoch
+    test_epochs: "299"
+    epoch_save_sample_level_csv: false

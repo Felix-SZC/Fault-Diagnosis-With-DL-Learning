@@ -1,0 +1,68 @@
+# =========================================================
+# Fi-only NvF · 阶段一（无 model0）
+# =========================================================
+# 脚本: train_nvf_fi_triple.py
+# 作用: 依次独立训练 model_1 .. model_{K-1}；每个头只用子集「正常(类0) + 第 i 类故障」，
+#       监督为二分类 one-hot：正常 [1,0]、本类故障 [0,1]（与原版 train_nvf 对 k>=1 一致）。
+#       不训练 model_0，不引入三态 [0,0]（子集中无「其它故障」样本）。
+# 顺序: 本配置跑完后，用阶段二 joint 配置 + train_nvf_fi_joint.py 做全闭集三态微调。
+# 注意: checkpoint_dir 与原版 bench_NvF 隔离；K = len(known_classes)，故障专家个数为 K-1。
+# =========================================================
+
+data:
+  # npy 数据根目录（相对 ResNet2d_EDL_EnsembleBinary 工作目录）
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    # 闭集已知类顺序决定标签 0..K-1（首项一般为正常）
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+      - '9齿轮缺齿'
+    # 测试集可含未知类；训练集仍只使用 known_classes
+    unknown_classes:
+      - '7齿轮断齿'
+
+model:
+  # 1D LaoDA：每个子模型 num_classes=2（EDL 二分类头）
+  type: 'LaoDA'
+
+train:
+  num_epochs: 80
+  batch_size: 256
+  learning_rate: 0.0005
+  # 阶段一输出：model_1.pth .. model_{K-1}.pth（无 model_0.pth）
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_7/stage1'
+  # true 时每个 epoch 额外写入 epochs/<e>/model_*.pth（阶段二逐轮测试需要）
+  save_every_epoch: false
+  notes: 'Fi-only stage1 (no model0)'
+  edl_loss_type: 'mse'        # mse | digamma | log
+  edl_annealing_step: 80      # KL 退火步数；<=0 可关闭退火（视 common/edl 实现）
+  kl_weight: 1.0              # Dirichlet KL 正则权重
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9               # 仅 SGD 时有效
+  weight_decay: 0.0005
+  seed: 42
+  scheduler:
+    use_scheduler: false
+    scheduler_type: 'StepLR'
+    step_size: 40
+    gamma: 0.1
+  # 占位与原版配置对齐；实际逻辑由 train_nvf_fi_triple 固定为 Fi-only
+  ensemble_strategy: 'Normal_vs_Fault_i'
+
+  # 供 test_NvF_fi_triple.py 读取（阶段一完成后可用本 config + --checkpoint 指向上述目录做快速测）
+  test_infer:
+    # Fi-only 推理：全体头「正常态」阈值 p0>fi_tau_normal 且 p1<fi_tau_fault；故障命中 p1>fi_tau_fault
+    fi_tau_normal: 0.5
+    fi_tau_fault: 0.5
+    test_all_epochs: false
+    # 可选：只测部分 epoch，语法同 --test_epochs（不配且 test_all_epochs=false 则只测根目录最终权重）
+    # test_epochs: "10-20"
+    # true 时逐 epoch 测试写大 CSV，较慢
+    epoch_save_sample_level_csv: false
