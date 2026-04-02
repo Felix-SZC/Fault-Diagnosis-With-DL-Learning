@@ -25,9 +25,9 @@ data:
       - '5轴承组合'
       - '6齿根裂纹'
       - '8齿轮点蚀'
+      - '9齿轮缺齿'
     unknown_classes:
       - '7齿轮断齿'
-      - '9齿轮缺齿'
 
 model:
   type: 'LaoDA'
@@ -37,11 +37,11 @@ train:
   num_epochs: 200
   batch_size: 256
   learning_rate: 0.0005
-  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_joint_unc/seed2'
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_joint_unc/OOD_7'
   save_every_epoch: true
   notes: 'Joint finetune for NvF: raise wrong-expert uncertainty'
   edl_loss_type: 'mse'
-  edl_annealing_step: 180
+  edl_annealing_step: 150
   kl_weight: 1.0
   device: 'cuda'
   optimizer: 'Adam'
@@ -56,7 +56,7 @@ train:
 
   joint_finetune:
     # train_nvf.py 产出的 baseline 子模型目录（输入）
-    input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF/seed2'
+    input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF/OOD_7'
     # true: 仅训练分类头（LaoDA 默认仅 fc2）；false: 全量参数联合微调
     head_only: false
     # 仅在 LaoDA + head_only=true 时生效：
@@ -65,7 +65,7 @@ train:
 
     # 总损失：L_total = L_base + lambda_unc * L_unc
     # lambda_unc 越大，越强调“错专家高不确定度”，但过大可能损伤 OOD AUROC
-    lambda_unc: 0.2
+    lambda_unc: 0.1
     # 前 warmup_epochs 轮仅优化 L_base（不加联合项）
     warmup_epochs: 20
     # warmup 后，在 ramp_epochs 内线性将 lambda 从 0 拉到 lambda_unc
@@ -74,7 +74,7 @@ train:
     # 错专家不确定度项（L_unc 的 wrong 部分）
     # margin: max(0, u_margin - u_wrong)，只惩罚“不够高”的不确定度（更稳）
     # target1: (1 - u_wrong)^2，直接逼近 1（更激进）
-    wrong_mode: 'margin'  # margin | target1
+    wrong_mode: 'target1'  # margin | target1
     # 仅 wrong_mode=margin 生效：错专家不确定度目标下限
     # 建议范围：0.7~0.9；太高可能导致模型过保守
     u_margin: 0.8
@@ -83,6 +83,34 @@ train:
     # 错专家项权重（抬高 u_wrong）
     wrong_weight: 1.0
 
+    # true：y>0（已知故障）时 L_unc / L_neg 的「错专家」不含 model_0，避免与 L_base 在故障上要求 model0 判「非正常」冲突；false 为旧行为（可复现历史实验）
+    wrong_unc_exclude_model0_on_fault: true
+
+    # 可选：错专家正类 logit 直接压制（用于抑制 OOD 被错专家高置信接收）
+    # L_neg = mean( relu(pos_logit_wrong - neg_margin) )
+    # - false: 关闭，保持原方案（仅 L_base + lambda_unc * L_unc）
+    # - true : 开启，并额外加入 lambda_neg * L_neg
+    use_wrong_pos_loss: true
+    # L_neg 最终权重（建议先小值试起：0.02~0.1）
+    lambda_neg: 0.1
+    # 错专家正类 logit 上限：0 表示要求错专家 pos_logit 尽量不超过 0
+    # 更小(负数)更严格，更大(正数)更宽松
+    neg_margin: -10.0
+    # L_neg 的 warmup/ramp（可不填；不填时默认复用 warmup_epochs/ramp_epochs）
+    # neg_warmup_epochs: 20
+    # neg_ramp_epochs: 20
+
+    # 三损失量级对齐（固定参考归一化）
+    # total = base_n + lambda_unc * unc_n + lambda_neg * neg_n
+    # 其中 *_n = *_loss / (ref_* + eps)
+    loss_normalization:
+      enable: false
+      mode: 'fixed_ref'    # 当前仅支持 fixed_ref
+      # 训练开始前，用多少个 train batch 估计 ref_base/ref_unc/ref_neg
+      ref_batches: 20
+      # 防止除零
+      eps: 1.0e-8
+
     # 调试/快速试验：每个 epoch 最多用多少个 batch；0 表示使用全部 batch
     max_batches_per_epoch: 0
 
@@ -90,19 +118,20 @@ train:
     # 闭集类别决策方式：
     # - nvf_fusion: 使用 NvF 融合分数 final_probs.argmax
     # - min_u_gated: 先用 model_0 判正常/故障，再在故障子模型里优先选低不确定度
+    # - min_u_gated_nf: 不用 model_0；仅当故障专家 1..K-1 的 p_yes 全部 ≤0.5 判正常，否则故障分支同 min_u_gated
     # 建议联合微调后先用 min_u_gated，更直接观察“错专家不确定度抬高”是否有效
-    class_decision: 'min_u_gated'  # nvf_fusion | min_u_gated
+    class_decision: 'min_u_gated'  # nvf_fusion | min_u_gated | min_u_gated_nf
 
     # 仅在 class_decision=nvf_fusion 时参与“故障分支融合”：
     # - legacy: 直接用各 fault 子模型 p_yes 作为故障分支权重
     # - softmax: 对 fault 子模型分数做 softmax 后再融合
-    # min_u_gated 下此项不参与闭集类别决策
+    # min_u_gated / min_u_gated_nf 下此项不参与闭集类别决策
     fault_fusion: 'legacy'
 
     # fault_fusion=softmax 时的温度参数：
     # - 较小（<1）: 分布更尖锐，更偏向单个高分 fault 子模型
     # - 较大（>1）: 分布更平滑，降低单模型主导
-    # min_u_gated 下此项不参与闭集类别决策
+    # min_u_gated / min_u_gated_nf 下此项不参与闭集类别决策
     fusion_tau: 0.5
 
     # OOD 分数聚合方式：
@@ -113,14 +142,16 @@ train:
     #   score = 2 / (alpha_pos_winner + 1)
     # 说明：
     # - class_decision=nvf_fusion: 以上四种均可用
-    # - class_decision=min_u_gated: 默认走门控 OOD 分数；若设 winner_pos_only 会覆盖为上述 pos-only 规则
-    ood_score_mode: 'winner_pos_only'
+    # - class_decision=min_u_gated 或 min_u_gated_nf: 默认走门控 OOD 分数；若设 winner_pos_only 会覆盖为上述 pos-only 规则
+    ood_score_mode: 'winner_only'
 
     # 仅当 ood_score_mode=key_models 时生效：
     # score = ood_lambda * u0 + (1-ood_lambda) * u_winner
-    # min_u_gated 下被忽略
+    # min_u_gated / min_u_gated_nf 下被忽略
     ood_lambda: 1.0
     # 是否默认测试每个 epoch（等价于命令行加 --test_all_epochs）
     # 依赖训练阶段开启 train.save_every_epoch=true
     test_all_epochs: false
+    # 逐轮目录 epochs/<e>/ 是否写 id_uncertainty_analysis_nvf.csv、ood_uncertainty_analysis_nvf.csv；false 可明显加速
+    epoch_save_sample_level_csv: true
 

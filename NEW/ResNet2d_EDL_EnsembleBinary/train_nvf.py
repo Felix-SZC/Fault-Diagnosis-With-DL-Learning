@@ -71,12 +71,11 @@ def resolve_model_indices(train_config, K):
     return normalized
 
 
-def main():
-    parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：训练 K 个独立二分类 EDL 小模型')
-    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
-    args = parser.parse_args()
-
-    config = load_config(args.config)
+def run_nvf_training(config, model_indices=None):
+    """
+    按 NvF 策略训练指定子模型并保存 model_{k}.pth。
+    model_indices 为 None 时从 config['train'] 解析；否则使用传入列表（如 Fi-only: range(1,K)）。
+    """
     data_config = config['data']
     train_config = config['train']
     model_config = config['model']
@@ -133,7 +132,8 @@ def main():
                          start_time=train_start_time)
 
     model_kw = {'num_classes': 2}
-    model_indices = resolve_model_indices(train_config, K)
+    if model_indices is None:
+        model_indices = resolve_model_indices(train_config, K)
     print(f"本次将训练子模型索引: {model_indices}")
 
     for k in model_indices:
@@ -338,7 +338,15 @@ def main():
         start_time=train_start_time,
         end_time=train_end_time,
     )
-    print("\nK 个 NvF 二分类 EDL 模型训练完成。")
+    print("\nNvF 二分类 EDL 子模型训练完成（已训练索引: %s）。" % model_indices)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='EDL 集成二分类 (NvF)：训练 K 个独立二分类 EDL 小模型')
+    parser.add_argument('--config', type=str, default='configs/bench_NvF_LaoDA.yaml')
+    args = parser.parse_args()
+    config = load_config(args.config)
+    run_nvf_training(config, model_indices=None)
 
 
 if __name__ == '__main__':

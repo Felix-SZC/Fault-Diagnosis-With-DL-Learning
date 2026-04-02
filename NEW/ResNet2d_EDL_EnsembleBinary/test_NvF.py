@@ -125,6 +125,17 @@ def compute_uncertainty_threshold_iqr(
                         alpha_pos_stack=alpha_pos_stack,
                         pred_idx=preds_t,
                     )
+            elif class_decision == 'min_u_gated_nf':
+                preds_t, score = gated_min_u_preds_and_ood_nf_only(u_k_stack, p_yes_list, K)
+                if ood_score_mode == 'winner_pos_only':
+                    score = compute_batch_ood_score(
+                        u_k_stack,
+                        winner_fault_idx=torch.zeros_like(preds_t),
+                        ood_score_mode=ood_score_mode,
+                        ood_lambda=ood_lambda,
+                        alpha_pos_stack=alpha_pos_stack,
+                        pred_idx=preds_t,
+                    )
             else:
                 final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
                     p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
@@ -198,6 +209,55 @@ def gated_min_u_preds_and_ood(u_k_stack, p_yes_list, K):
         fault_preds,
     )
     ood_score = torch.where(normal_mask, u_k_stack[:, 0], ood_fault)
+    return preds, ood_score
+
+
+def gated_min_u_preds_and_ood_nf_only(u_k_stack, p_yes_list, K):
+    """
+    门控不使用 model0，仅用故障专家 1..K-1 的 N/F_i：
+    - 若全部 p_yes_k <= 0.5（各专家均判「非本故障」）→ 预测类 0；
+      门控路径 OOD 分数取 u_1..u_{K-1} 的均值（不依赖 u_0）。
+    - 否则（故障分支）：与 min_u_gated 相同——在 p_yes>0.5 的子模型中取 u 最小者为故障类；
+      若全无 p_yes>0.5 则 argmax(p_yes) 定类且 OOD=1.0。
+    """
+    device = u_k_stack.device
+    dtype = u_k_stack.dtype
+    B = u_k_stack.shape[0]
+
+    if K <= 1:
+        preds = torch.zeros(B, dtype=torch.long, device=device)
+        ood_score = u_k_stack[:, 0]
+        return preds, ood_score
+
+    u_fault = u_k_stack[:, 1:K]  # [B, K-1]
+    p_fault = torch.stack(p_yes_list[1:K], dim=1)
+    normal_mask = (p_fault <= 0.5).all(dim=1)
+
+    valid = p_fault > 0.5
+    has_any = valid.any(dim=1)
+
+    inf = torch.tensor(float('inf'), device=device, dtype=dtype)
+    u_masked = torch.where(valid, u_fault, inf)
+    k_rel_minu = u_masked.argmin(dim=1)
+    fault_pred_minu = (k_rel_minu + 1).long()
+
+    k_rel_maxp = p_fault.argmax(dim=1)
+    fault_pred_fallback = (k_rel_maxp + 1).long()
+
+    fault_preds = torch.where(has_any, fault_pred_minu, fault_pred_fallback)
+
+    ood_minu = u_k_stack.gather(1, fault_pred_minu.unsqueeze(1)).squeeze(1)
+    ood_fallback = torch.ones(B, device=device, dtype=dtype)
+    ood_fault = torch.where(has_any, ood_minu, ood_fallback)
+
+    ood_normal = u_fault.mean(dim=1)
+
+    preds = torch.where(
+        normal_mask,
+        torch.zeros(B, dtype=torch.long, device=device),
+        fault_preds,
+    )
+    ood_score = torch.where(normal_mask, ood_normal, ood_fault)
     return preds, ood_score
 
 
@@ -315,6 +375,11 @@ def run_test_loop(
                 preds_t, ood_t = gated_min_u_preds_and_ood(u_k_stack_early, p_yes_list, K)
                 preds_local = preds_t.cpu().numpy()
                 winner_fault_idx = None  # 仅 nvf_fusion 路径使用
+            elif class_decision == 'min_u_gated_nf':
+                u_k_stack_early = torch.stack(u_k_list, dim=1)
+                preds_t, ood_t = gated_min_u_preds_and_ood_nf_only(u_k_stack_early, p_yes_list, K)
+                preds_local = preds_t.cpu().numpy()
+                winner_fault_idx = None
             else:
                 final_probs, winner_fault_idx = build_nvf_final_probs_and_winner(
                     p_yes_list, K, fault_fusion=fault_fusion, fusion_tau=fusion_tau
@@ -344,7 +409,7 @@ def run_test_loop(
                     closed_set_true.append(int(labels[i]))
                     closed_set_pred.append(int(preds_local[i]))
 
-            if class_decision == 'min_u_gated':
+            if class_decision in ('min_u_gated', 'min_u_gated_nf'):
                 if ood_score_mode == 'winner_pos_only':
                     pred_idx_t = torch.from_numpy(preds_local).to(inputs.device)
                     uncertainty = compute_batch_ood_score(
@@ -522,7 +587,9 @@ def evaluate_and_save_outputs(
     ood_lambda,
     uncertainty_threshold,
     output_dir,
+    save_sample_level_csv=True,
 ):
+    """save_sample_level_csv=False 时不写 id/ood 逐样本大表（逐 epoch 测试时可加速）。"""
     os.makedirs(output_dir, exist_ok=True)
     known_mask = all_labels < K
     unknown_mask = ~known_mask
@@ -687,31 +754,72 @@ def evaluate_and_save_outputs(
             plt.savefig(os.path.join(output_dir, 'uncertainty_distribution_mean_nvf.png'), dpi=150)
             plt.close()
 
-    # OOD 样本级分析表（仅未知类）
-    ood_analysis_path = os.path.join(output_dir, 'ood_uncertainty_analysis_nvf.csv')
-    with open(ood_analysis_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            'sample_index',
-            'true_label_idx',
-            'true_label_name',
-            'pred_label_idx',
-            'pred_label_name',
-            'winner_model_idx',
-            'winner_p_yes',
-            'winner_pos_logit',
-            'winner_neg_logit',
-            'ood_score',
-            'ood_threshold',
-            'is_rejected_as_unknown',
-        ])
-        if has_unknown_samples:
-            ood_idx = np.where(unknown_mask)[0]
-            for i in ood_idx:
+    if save_sample_level_csv:
+        # OOD 样本级分析表（仅未知类）
+        ood_analysis_path = os.path.join(output_dir, 'ood_uncertainty_analysis_nvf.csv')
+        with open(ood_analysis_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'sample_index',
+                'true_label_idx',
+                'true_label_name',
+                'pred_label_idx',
+                'pred_label_name',
+                'winner_model_idx',
+                'winner_p_yes',
+                'winner_pos_logit',
+                'winner_neg_logit',
+                'ood_score',
+                'ood_threshold',
+                'is_rejected_as_unknown',
+            ])
+            if has_unknown_samples:
+                ood_idx = np.where(unknown_mask)[0]
+                for i in ood_idx:
+                    t_idx = int(all_labels[i])
+                    p_idx = int(all_preds[i])
+                    w_idx = int(winner_model_idx[i])
+                    t_name = unknown_classes[t_idx - K] if 0 <= (t_idx - K) < len(unknown_classes) else f'Unknown_{t_idx}'
+                    p_name = 'Unknown' if p_idx < 0 or p_idx >= K else str(known_classes[p_idx])
+                    writer.writerow([
+                        int(sample_index[i]),
+                        t_idx,
+                        t_name,
+                        p_idx,
+                        p_name,
+                        w_idx,
+                        float(winner_p_yes[i]),
+                        float(winner_pos_logit[i]),
+                        float(winner_neg_logit[i]),
+                        float(all_uncertainties[i]),
+                        float(uncertainty_threshold),
+                        int(p_idx < 0),
+                    ])
+
+        # ID 样本级分析表（仅已知类）
+        id_analysis_path = os.path.join(output_dir, 'id_uncertainty_analysis_nvf.csv')
+        with open(id_analysis_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'sample_index',
+                'true_label_idx',
+                'true_label_name',
+                'pred_label_idx',
+                'pred_label_name',
+                'winner_model_idx',
+                'winner_p_yes',
+                'winner_pos_logit',
+                'winner_neg_logit',
+                'ood_score',
+                'ood_threshold',
+                'is_rejected_as_unknown',
+            ])
+            id_idx = np.where(known_mask)[0]
+            for i in id_idx:
                 t_idx = int(all_labels[i])
                 p_idx = int(all_preds[i])
                 w_idx = int(winner_model_idx[i])
-                t_name = unknown_classes[t_idx - K] if 0 <= (t_idx - K) < len(unknown_classes) else f'Unknown_{t_idx}'
+                t_name = str(known_classes[t_idx]) if 0 <= t_idx < K else f'Class_{t_idx}'
                 p_name = 'Unknown' if p_idx < 0 or p_idx >= K else str(known_classes[p_idx])
                 writer.writerow([
                     int(sample_index[i]),
@@ -727,46 +835,6 @@ def evaluate_and_save_outputs(
                     float(uncertainty_threshold),
                     int(p_idx < 0),
                 ])
-
-    # ID 样本级分析表（仅已知类）
-    id_analysis_path = os.path.join(output_dir, 'id_uncertainty_analysis_nvf.csv')
-    with open(id_analysis_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            'sample_index',
-            'true_label_idx',
-            'true_label_name',
-            'pred_label_idx',
-            'pred_label_name',
-            'winner_model_idx',
-            'winner_p_yes',
-            'winner_pos_logit',
-            'winner_neg_logit',
-            'ood_score',
-            'ood_threshold',
-            'is_rejected_as_unknown',
-        ])
-        id_idx = np.where(known_mask)[0]
-        for i in id_idx:
-            t_idx = int(all_labels[i])
-            p_idx = int(all_preds[i])
-            w_idx = int(winner_model_idx[i])
-            t_name = str(known_classes[t_idx]) if 0 <= t_idx < K else f'Class_{t_idx}'
-            p_name = 'Unknown' if p_idx < 0 or p_idx >= K else str(known_classes[p_idx])
-            writer.writerow([
-                int(sample_index[i]),
-                t_idx,
-                t_name,
-                p_idx,
-                p_name,
-                w_idx,
-                float(winner_p_yes[i]),
-                float(winner_pos_logit[i]),
-                float(winner_neg_logit[i]),
-                float(all_uncertainties[i]),
-                float(uncertainty_threshold),
-                int(p_idx < 0),
-            ])
 
     has_ood_row = np.any(all_labels >= K)
     if p_yes_matrix.size > 0:
@@ -892,7 +960,12 @@ def main():
     parser.add_argument('--fusion_tau', type=float, default=None)
     parser.add_argument('--ood_score_mode', type=str, default=None, choices=['mean_all', 'key_models', 'winner_only', 'winner_pos_only'])
     parser.add_argument('--ood_lambda', type=float, default=None)
-    parser.add_argument('--class_decision', type=str, default=None, choices=['nvf_fusion', 'min_u_gated'])
+    parser.add_argument(
+        '--class_decision',
+        type=str,
+        default=None,
+        choices=['nvf_fusion', 'min_u_gated', 'min_u_gated_nf'],
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -913,8 +986,10 @@ def main():
     ood_score_mode = args.ood_score_mode if args.ood_score_mode is not None else test_infer_cfg.get('ood_score_mode', 'mean_all')
     ood_lambda = args.ood_lambda if args.ood_lambda is not None else float(test_infer_cfg.get('ood_lambda', 0.5))
     class_decision = args.class_decision if args.class_decision is not None else test_infer_cfg.get('class_decision', 'nvf_fusion')
-    if class_decision not in ('nvf_fusion', 'min_u_gated'):
-        raise ValueError(f"不支持的 class_decision={class_decision}，应为 nvf_fusion 或 min_u_gated")
+    if class_decision not in ('nvf_fusion', 'min_u_gated', 'min_u_gated_nf'):
+        raise ValueError(
+            f"不支持的 class_decision={class_decision}，应为 nvf_fusion、min_u_gated 或 min_u_gated_nf"
+        )
     if fusion_tau <= 0:
         raise ValueError("fusion_tau 必须 > 0")
     ood_lambda = min(max(float(ood_lambda), 0.0), 1.0)
@@ -928,6 +1003,13 @@ def main():
             "若全无 p_yes>0.5 则 argmax(p_yes) 定类且 OOD=1.0；其余 OOD=决策子模型 u。"
             "（fault_fusion/fusion_tau 不参与类别决策。若 ood_score_mode=winner_pos_only，"
             "则按闭集预测模型计算 pos-only 不确定度；否则沿用门控路径 OOD 分数。）"
+        )
+    elif class_decision == 'min_u_gated_nf':
+        print(
+            "  [min_u_gated_nf] 闭集：不使用模型0 门控；若故障专家 1..K-1 的 p_yes 全部 ≤0.5 则类0，"
+            "否则与 min_u_gated 相同在 p_yes>0.5 子集中取 u 最小定故障类。"
+            "门控路径 OOD：类0 时为 u_1..u_{K-1} 均值；故障分支同 min_u_gated。"
+            "（ood_score_mode=winner_pos_only 时仍按闭集预测 winner 算 pos-only，pred=0 时 winner 为模型0。）"
         )
 
     if args.checkpoint:
@@ -952,12 +1034,17 @@ def main():
 
     test_all_epochs_default = bool(test_infer_cfg.get('test_all_epochs', False))
     run_test_all_epochs = bool(args.test_all_epochs or test_all_epochs_default)
+    # 逐轮评估时是否写 id/ood 逐样本 CSV（默认 false 加速）
+    epoch_save_sample_level_csv = bool(test_infer_cfg.get('epoch_save_sample_level_csv', False))
     if run_test_all_epochs:
         epochs = discover_epochs(checkpoint_dir, K)
         if not epochs:
             print("未找到任何 epoch 权重（需 checkpoint_dir/epochs/*/ 下 model_k.pth），请先训练并开启 save_every_epoch。")
             return
-        print(f"全测试模式：共 {len(epochs)} 个 epoch，将依次测试并汇总到 test_results_all_epochs_nvf.csv")
+        print(
+            f"全测试模式：共 {len(epochs)} 个 epoch，将依次测试并汇总到 test_results_all_epochs_nvf.csv"
+            + ("；逐轮不写逐样本 id/ood CSV（加速）" if not epoch_save_sample_level_csv else "")
+        )
         models = load_models(checkpoint_dir, K, backbone_type, device, epoch=None)
         if args.threshold_from_val:
             val_dataset = get_dataset(data_config, backbone_type, split='test', filter_classes=known_classes)
@@ -1021,6 +1108,7 @@ def main():
                 ood_lambda=ood_lambda,
                 uncertainty_threshold=uncertainty_threshold,
                 output_dir=epoch_output_dir,
+                save_sample_level_csv=epoch_save_sample_level_csv,
             )
             all_epoch_rows.append({
                 'epoch': e,

@@ -1,0 +1,80 @@
+# =========================================================
+# NvF 联合微调（QuickCheck）
+# 用于快速验证三损失 fixed_ref 归一化逻辑是否跑通
+# =========================================================
+
+data:
+  data_dir: '../Kong_code&&data/数据打包/2'
+  openset:
+    known_classes:
+      - '1正常'
+      - '2轴承内圈'
+      - '3轴承外圈'
+      - '4轴承滚子'
+      - '5轴承组合'
+      - '6齿根裂纹'
+      - '8齿轮点蚀'
+    unknown_classes:
+      - '7齿轮断齿'
+      - '9齿轮缺齿'
+
+model:
+  type: 'LaoDA'
+
+train:
+  model_indices: 'all'
+  num_epochs: 2
+  batch_size: 256
+  learning_rate: 0.0005
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_joint_unc_quickcheck/seed2'
+  save_every_epoch: false
+  notes: 'Quickcheck for fixed_ref loss normalization'
+  edl_loss_type: 'mse'
+  edl_annealing_step: 180
+  kl_weight: 1.0
+  device: 'cuda'
+  optimizer: 'Adam'
+  momentum: 0.9
+  weight_decay: 0.0005
+  scheduler:
+    use_scheduler: false
+    scheduler_type: 'StepLR'
+    step_size: 60
+    gamma: 0.1
+  ensemble_strategy: 'Normal_vs_Fault_i'
+
+  joint_finetune:
+    input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF/seed2'
+    head_only: false
+    train_fc1: false
+
+    lambda_unc: 0.2
+    warmup_epochs: 0
+    ramp_epochs: 1
+    wrong_mode: 'margin'
+    u_margin: 0.8
+    match_weight: 1.0
+    wrong_weight: 1.0
+
+    use_wrong_pos_loss: true
+    lambda_neg: 0.2
+    neg_margin: -1.0
+    neg_warmup_epochs: 0
+    neg_ramp_epochs: 1
+
+    loss_normalization:
+      enable: true
+      mode: 'fixed_ref'
+      ref_batches: 4
+      eps: 1.0e-8
+
+    # 快速检查：每个 epoch 仅跑 1 个 batch
+    max_batches_per_epoch: 1
+
+  test_infer:
+    class_decision: 'min_u_gated'
+    fault_fusion: 'legacy'
+    fusion_tau: 0.5
+    ood_score_mode: 'winner_pos_only'
+    ood_lambda: 1.0
+    test_all_epochs: false
