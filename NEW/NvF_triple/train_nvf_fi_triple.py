@@ -34,6 +34,7 @@ def get_dataset(data_config, model_type, split="train"):
     unknown_classes = openset_config.get("unknown_classes", [])
     if known_classes is None:
         raise ValueError("配置文件中必须指定 data.openset.known_classes")
+    augment_config = data_config.get("augmentation", {})
     dataset_cls = NpyPackDataset1D if model_type == "LaoDA" else NpyPackDataset
     return dataset_cls(
         data_dir=data_dir,
@@ -41,6 +42,7 @@ def get_dataset(data_config, model_type, split="train"):
         filter_classes=known_classes,
         known_classes=known_classes,
         unknown_classes=unknown_classes,
+        augment_config=augment_config,
     )
 
 

@@ -1,83 +1,77 @@
-# Cursor Context（NvF-EDL 故障诊断与开集）
+# NvF_triple 方案内容总结与上下文
 
-本文档供新对话快速对齐：**代码在做什么、思路演变、已知坑、当前矛盾**。路径以仓库内 `NEW/ResNet2d_EDL_EnsembleBinary/` 为主。
+本文档总结了当前 `NEW/NvF_triple` 目录下的 "Fi-only 三态两阶段" 故障诊断模型的方案内容、主要技术点，以及当前遇到的关键问题和矛盾。
 
----
+## 1. 项目基本架构 (Fi-only 三态两阶段方案)
 
-## 1) 当前主线：NvF
+该方案旨在实现旋转机械故障的闭集诊断和开集（OOD）检测，核心思想是基于证据深度学习（EDL）构建一个二分类子模型集成。
 
-- **结构**：`model_0`（正常 vs 全体已知故障）+ `model_1..K-1`（正常 vs 故障 i）。
-- **训练**：`train_nvf.py` 预训练各子模型 → `train_nvf_joint_uncertainty.py` 联合微调。
-- **测试**：`test_NvF.py`；闭集决策：`nvf_fusion` / `min_u_gated` / `min_u_gated_nf`（见 `train.test_infer`）。
-- **EDL**：`evidence = relu(logits)`，`α = evidence + 1`，`S = Σα`，常用 **vacuity 式** `u = 2/S`（证据越多、S 越大、u 越小）。
-- **联合微调**：`L_total = L_base + λ_unc·L_unc + (可选) λ_neg·L_neg`；`L_base` 对每个子模型各有一套二分类标签与 EDL 损失。
+*   **模型结构 (Fi-only Ensemble)**：
+    *   取消了全局的 "正常 vs 所有故障" 的 `model_0`。
+    *   保留 `K-1` 个专家子模型（`model_1` 到 `model_{K-1}`）。
+    *   每个专家子模型只做二分类任务，例如 `model_i` 只区分 "正常类" 和 "特定故障类 i"。
+*   **三态监督机制 (Triple-State Supervision)**：
+    *   针对每个子模型 `k`，标签映射为三种状态：
+        *   `[1, 0]`：如果样本是正常类（类别 0）。
+        *   `[0, 1]`：如果样本是对应的故障类 `k`（正匹配）。
+        *   `[0, 0]`：如果样本是**其他已知故障类**，或者是**合成的噪声/未知类**。
+    *   `[0, 0]` 的目标是强迫该模型对不属于其负责领域的样本不输出任何类别证据，从而导致高不确定度（Vacuity）。
+*   **两阶段训练策略**：
+    *   **阶段一 (Independent Training, `train_nvf_fi_triple.py`)**：各个专家模型 `1` 到 `K-1` 独立训练，仅使用其对应的 `[1, 0]` 和 `[0, 1]` 监督数据。
+    *   **阶段二 (Joint Fine-tuning, `train_nvf_fi_joint.py`)**：所有专家模型联合微调。在这一阶段引入了 `[0, 0]` 监督，让模型学习拒绝不匹配的已知故障。
+*   **核心模块**：
+    *   `nvf_fi_triple_common.py`: 包含核心损失 `fi_triple_edl_mse_loss` 以及 Fi-only 融合推理 `fi_triple_preds_and_ood`。
+    *   `test_NvF_fi_triple.py`: 测试脚本已收敛为仅保留 `logic` OOD 分数，输出单一分布图 `uncertainty_distribution_mean_nvf.png`。
 
----
+## 2. 近期引入的优化机制
 
-## 2) 关键抉择与思路演变（按主题）
+基于导师的反馈，项目中新增了以下机制以提升对无意义噪声和 OOD 样本的排斥能力：
 
-- **专利/路线**：先不做导师侧「距离/度量」微调，优先「错专家不确定度」与测试端策略验证；距离类 loss 可与 `L_base` 叠加，属另一大类目标。
-- **测试端**：已支持多种 `ood_score_mode`（含 `winner_pos_only`）、样本级 `id/ood_uncertainty_analysis_nvf.csv`、逐 epoch 测试与汇总 CSV。
-- **NvF + `L_unc` 与 model0（重要）**  
-  - **改前**：`y=j>0`（已知故障）时，`L_unc` 的「错专家要高 u」包含 **model0**（除真类列外所有列）。  
-  - **后果**：与 `L_base` 要求 model0 在故障图上**明确判「非正常」**相冲突，易把 model0 在 ID 故障上拉「犹豫」，**OOD 更易被 model0 高置信判正常**。  
-  - **拟议改法（与代码计划一致）**：`y>0` 时 **错专家 u 只作用于故障专家 `1..K-1` 中非真类**，**不要把 model0 列纳入 wrong_u**；配置开关默认关以保持旧实验可复现。
-- **`L_base` vs `L_unc`**：`L_base` 已能学「各头在 y=0 / y=i 上该如何分配证据」；`L_unc` 额外塑造**同一 batch 上各头 u 的相对关系**以利融合/拒识。仅 `L_base` 联合微调 ≈ **多专家有监督继续训练**，不保证 OOD 一定变好。
-- **OOD 指标解读（实测经验）**：可出现 **AUROC 高但 F1/MAR 很差**——排序尚可，但**固定阈值（如 0.5）与当前 `ood_score` 尺度不匹配**，或 `winner_only` 下 OOD 被**误收入闭集**时胜者 **u 仍很低**。优先 **阈值校准**（`--threshold_from_val` 或扫描）、再试 **`ood_score_mode`**（`mean_all` / `key_models` 等）。
+1.  **动态多类型白噪声注入 (White Noise Injection)**：
+    *   在阶段二联合微调中，动态生成比例为 `ratio` 的纯噪声样本，标签统一设为 `K`（OOD）。
+    *   实现了多类型噪声（`multi_type=True`）：涵盖高斯白噪声、均匀噪声、脉冲、正弦、粉红噪声、零信号、常数信号，以及它们随机拼接的混合噪声（`mixed`）。
+    *   **目标**：强制模型将各种无意义的波形分配到 `[0, 0]` 状态，抑制过度自信。
+2.  **受控信号数据增强 (Signal Augmentation)**：
+    *   在 `common/utils/augmentation.py` 中实现了多种增强：随机时移（`max_shift_ratio`）、随机振幅缩放（`min_max_scale`）、附加高斯噪声（`noise_std_ratio`）、连续遮挡掩码（`max_mask_ratio`）、低频基线漂移（`structure_noise_scale`）。
+    *   增强应用在阶段一和阶段二的真实训练样本上，以提升模型对非平稳工况的泛化性。
+3.  **OOD 证据惩罚损失 (OOD Penalty Loss)**：
+    *   在 `fi_triple_edl_mse_loss` 中加入了 `ood_penalty_weight` 项。
+    *   当样本被映射为 `[0,0]`（即其他已知故障或注入的噪声）时，施加一个 KL 散度惩罚，**明确强制其输出证据趋近于 0（即强制将其 Dirichlet 分布推向均匀分布，Vacuity $u \to 1$）**。
 
----
+## 3. 当前遇到的核心矛盾与问题
 
-## 3) 已完成代码变更（摘要）
+虽然引入了上述机制，但在 OOD 识别方面遇到了**根本性的指标反转现象**。
 
-### 3.1 `test_NvF.py`
+*   **现象描述**：
+    *   之前做过多种聚合不确定度对比（mean/max/std/conflict/winner），但出现了明显反转：这些统计量往往让 ID 分数高于 OOD，AUROC 很低。
+    *   当前实验流程已简化为仅保留 `logic` 分数及其分布图 `uncertainty_distribution_mean_nvf.png`，因为该方法分离效果最稳定（当前图上 AUROC 约 0.96）。
+*   **根因剖析 (二分类 EDL 的机制局限)**：
+    *   **关于 `[0,0]` 和 $u=1$ 的误解**：用户直觉上认为 "不匹配/OOD 应该被确认分到其它类，因此不确定度不应为 1"。但在目前的**二分类 EDL 设定**下，`[0,0]` 代表缺乏正负类证据，这在 EDL 的定义中**等同于最大无知（Vacuity/Uncertainty $u=1$）**。
+    *   **ID 样本为何整体 $u$ 更高？**
+        *   当输入一个 ID 故障（例如故障 1）时，`model_1` 会认出它（输出 `[0,1]`，$u \approx 0$）。
+        *   但是，**其余的 $M-1$ 个模型**（负责故障 2, 3...）会认为它是不匹配样本，在 `[0,0]` 监督下，它们被强制输出 $u \approx 1$。
+        *   因此，对于任何 ID 故障样本，集成中总有 1 个模型确定，而 $M-1$ 个模型极度不确定。计算 Mean(u) 或 Max(u) 时，会被这 $M-1$ 个 $u=1$ 拉高。
+    *   **OOD 样本为何整体 $u$ 反而低？**
+        *   当输入真正的未知 OOD 故障时，由于网络并未见过，可能所有模型都会将其误判为 "正常"（输出 `[1,0]`，$u \approx 0$）。
+        *   导致对于 OOD，所有模型都认为自己很确定（错认成了正常类），从而拉低了整体的 Mean(u) 或 Max(u)。
+    *   **Conflict（冲突度）为何反转？**
+        *   Conflict 衡量的是 "子模型之间意见的分歧程度"。
+        *   **ID 样本**：一个模型极度确信是故障（$p_{yes} \to 1$），其他模型认为是 `[0,0]` 或偏向正常，**模型间意见极度分裂，Conflict 极高**。
+        *   **OOD 样本**：如果所有模型都错误地将 OOD 识别为 "正常"，它们的**意见惊人地一致，导致 Conflict 极低**。
 
-- `winner_pos_only`、`compute_batch_ood_score`、`evaluate_and_save_outputs`、样本级 CSV 字段等（见 §7）。
-- **逐 epoch**：`test_infer.epoch_save_sample_level_csv`（默认 `false`）控制 `epochs/<e>/` 是否写 `id_*.csv` / `ood_*.csv`；**根目录最终一次测试**仍默认写全量。
-- `evaluate_and_save_outputs(..., save_sample_level_csv=True)` 可关闭上述两大 CSV。
+## 4. 后续思路与建议方向
 
-### 3.2 `train_nvf_joint_uncertainty.py`
+目前的 "二分类专家 + `[0,0]` 监督" 架构在表达 "确认是其他类" 的语义上存在先天不足。`[0,0]` 表达的是 "我不知道"，而不是 "我很确定这是其它"。
 
-- `calc_wrong_pos_logit_loss`、`L_neg` 与 `joint_history` 中 `train_neg`/`val_neg` 等（历史已完成）。
+**若要顺应 "确认是其它类则不该推向 u=1" 的直觉，可能需要进行架构级别的微调：**
 
-### 3.3 配置
-
-- `configs/bench_NvF_LaoDA_joint_uncertainty.yaml`：`test_infer` 含 `test_all_epochs`、`epoch_save_sample_level_csv` 等。
-
----
-
-## 4) 逐 epoch 测试为什么慢（可关闭什么）
-
-- **慢的主要原因**：`epoch 数 ×（整集前向 + 大量 matplotlib/seaborn 图）`。最耗：**K 子图二分类混淆矩阵**、**多张类×模型热力图（dpi 高 + 逐格标注）**、大张混淆矩阵。  
-- **其次**：`id/ood` **逐样本 CSV** 循环写盘。  
-- **关闭方式**：`test_infer.epoch_save_sample_level_csv: false`。汇总 `test_results_all_epochs_nvf.csv` 仍会写。
-
----
-
-## 5) 当前遇到的问题（给新对话的 checklist）
-
-1. **NvF 联合微调后 OOD**：部分实验 **model0 对 OOD 高概率正常**；根因分析指向 **`L_unc` 在 y=故障 时把 model0 当错专家拉高 u**，与 `L_base` 冲突 → **待实现「y>0 时 wrong_u 不含 model0」**（见 §2）。  
-2. **OOD 检测**：**AUROC 与 MAR/F1 不一致**时，先查 **阈值** 与 **`ood_score_mode`**，勿只改训练。  
-3. **测试耗时**：逐轮关大 CSV + 必要时减图或降 dpi。
-
----
-
-## 6) 建议的后续实验顺序（简版）
-
-1. 固定模型与 `ood_score_mode`，做 **阈值扫描**（或 `--threshold_from_val`）。  
-2. NvF：实现并 A/B **`wrong_unc_exclude_model0_on_fault`**（命名以代码为准）。  
-3. A/B：`L_unc` only vs `L_neg` only vs `L_unc + L_neg`（小 λ 起步）。  
-4. 用样本级 CSV 看 **OOD 被谁 winner、pos_logit 尾部**。  
-5. 再考虑 **损失归一化（EMA）** 与导师侧 **距离/原型** 项。
-
----
-
-## 7) 历史记录（2026-03-27 对话整理，仍有效部分）
-
-- 仅看类均值热力图会误导；**样本级 CSV** 才能定位「错专家高置信接收」。  
-- `winner_pos_only` 提升可解释性，不保证天然完全分离。  
-- `L_unc`（`u=2/S`）与 `L_neg`（压错专家 `pos_logit`）**互补**。  
-- 早期仅 `L_base` 闭集好属正常；加联合项后需看 **尾部分布**。
+1.  **三分类专家 (Tri-class Expert) 改造思路**：
+    *   将每个专家模型 `model_i` 从二分类头改为 **三分类头**：`[正常, 故障 i, 其它]`。
+    *   这样，当样本是其他已知故障或注入噪声时，模型可以明确输出极高的置信度指向第三类（"其它"），此时该子模型的不确定度 $u$ 会很低（因为它很确信这是"其它"）。
+    *   如此一来，真正的 OOD 样本如果特征四不像，才会导致真正的置信度平摊，产生高不确定度 $u=1$。
+2.  **不改变架构的妥协方案 (优化 Logic 融合)**：
+    *   当前代码已执行该策略：测试端仅保留 `logic` 评分链路，避免多指标并行带来的解释混乱。
+    *   后续优先在 `logic` 框架内做阈值校准、稳定性复验与误检样本分析。
 
 ---
-
-更新时间：2026-03-28（已去掉 Fi-only 支线描述）
+*更新于 2026-04-09：总结了新加入的噪声注入和数据增强机制，并深入分析了近期发现的 OOD 不确定度反转问题的根本原因。*

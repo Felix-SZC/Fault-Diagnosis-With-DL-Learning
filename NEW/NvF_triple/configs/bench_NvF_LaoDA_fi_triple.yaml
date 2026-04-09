@@ -26,6 +26,14 @@ data:
     # 测试集可含未知类；训练集仍只使用 known_classes
     unknown_classes:
       - '7齿轮断齿'
+  # 数据增强配置
+  augmentation:
+    enable: true                  # 整体开关，阶段一和阶段二均可受益
+    max_shift_ratio: 0.05         # 降低采样相位偏置 (允许最大 5% 的平移)
+    min_max_scale: true           # 降低幅值能量偏置 (随机幅度缩放 0.8~1.2)
+    noise_std_ratio: 0.05         # 提升抗噪鲁棒性 (注入真实信号标准差 5% 的高斯噪声)
+    max_mask_ratio: 0.1           # 抑制对偶然局部噪点或局部伪特征的依赖 (最多遮盖 10% 长度)
+    structure_noise_scale: 0.05   # 降低结构偏移偏置 (添加幅度为 5% 标准差的低频基线漂移)
 
 model:
   # 1D LaoDA：每个子模型 num_classes=2（EDL 二分类头）

@@ -2,6 +2,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from .augmentation import SignalAugmenter
 
 
 class NpyPackDataset1D(Dataset):
@@ -19,8 +20,11 @@ class NpyPackDataset1D(Dataset):
         filter_classes: list = None,
         known_classes: list = None,
         unknown_classes: list = None,
+        augment_config: dict = None,
     ):
         actual_split = "test" if split == "val" else split
+        self.split = split
+        self.augmenter = SignalAugmenter(augment_config) if augment_config else None
         x_path = os.path.join(data_dir, f"X_{actual_split}.npy")
         y_path = os.path.join(data_dir, f"y_{actual_split}.npy")
 
@@ -74,6 +78,10 @@ class NpyPackDataset1D(Dataset):
     def __getitem__(self, idx):
         x_sample = self.X[idx]  # [C, L]
         tensor = torch.from_numpy(x_sample).float()
+        
+        if self.split == 'train' and self.augmenter is not None:
+            tensor = self.augmenter(tensor)
+            
         label = self.y[idx]
         return tensor, label
 

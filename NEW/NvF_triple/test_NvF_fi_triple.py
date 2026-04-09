@@ -29,7 +29,10 @@ from common.utils.data_loader import NpyPackDataset
 from common.utils.data_loader_1d import NpyPackDataset1D
 from models import get_model
 
-from nvf_fi_triple_common import discover_epochs_fi, fi_triple_preds_and_ood
+from nvf_fi_triple_common import (
+    discover_epochs_fi,
+    fi_triple_preds_and_ood,
+)
 
 
 def parse_test_epochs_spec(spec: str) -> list[int]:
@@ -142,6 +145,7 @@ def run_test_loop_fi(
     M = K - 1
     all_labels = []
     all_preds = []
+    # 仅保留 logic 分数（与 uncertainty_distribution_mean_nvf.png 对应）
     all_uncertainties = []
     binary_rows = []
     closed_true = []
@@ -179,9 +183,11 @@ def run_test_loop_fi(
             lp_stack = torch.stack(lpos, dim=1)
             ln_stack = torch.stack(lneg, dim=1)
 
-            preds_closed, ood_t = fi_triple_preds_and_ood(p0_stack, p1_stack, u_stack, tau_normal, tau_fault)
+            preds_closed, ood_logic = fi_triple_preds_and_ood(
+                p0_stack, p1_stack, u_stack, tau_normal, tau_fault
+            )
+
             preds_closed = preds_closed.cpu().numpy()
-            unc = ood_t.cpu().numpy()
             B = inputs.size(0)
 
             binary_rows.append((p1_stack > 0.5).cpu().numpy().astype(np.int32))
@@ -190,13 +196,15 @@ def run_test_loop_fi(
             lp_rows.append(lp_stack.cpu().numpy())
             ln_rows.append(ln_stack.cpu().numpy())
 
+            all_uncertainties.extend(ood_logic.cpu().numpy().tolist())
+
             for i in range(B):
                 lbl = int(labels[i].item())
                 if lbl < K:
                     closed_true.append(lbl)
                     closed_pred.append(int(preds_closed[i]))
-                u_val = float(unc[i])
-                all_uncertainties.append(u_val)
+
+                u_val = float(ood_logic[i].item())
                 if u_val > uncertainty_threshold:
                     all_preds.append(-1)
                 else:
@@ -218,10 +226,13 @@ def run_test_loop_fi(
             sample_idx.append(np.arange(cursor, cursor + B, dtype=np.int64))
             cursor += B
 
+    # 对齐 evaluate 接口：仅保留 logic 一项
+    final_unc_dict = {"logic": np.array(all_uncertainties)}
+
     return (
         np.array(all_labels),
         np.array(all_preds),
-        np.array(all_uncertainties),
+        final_unc_dict,
         np.concatenate(binary_rows, axis=0),
         np.array(closed_true),
         np.array(closed_pred),
@@ -298,7 +309,7 @@ def plot_class_model_heatmap_fi(
 def evaluate_fi_outputs(
     all_labels,
     all_preds,
-    all_uncertainties,
+    uncertainties_dict,
     binary_preds_matrix,
     closed_set_true,
     closed_set_pred,
@@ -431,15 +442,16 @@ def evaluate_fi_outputs(
     if has_unknown_samples:
         true_u = (~known_mask).astype(int)
         pred_u = (all_preds == -1).astype(int)
+        unc_logic = uncertainties_dict["logic"]
         f1 = f1_score(true_u, pred_u)
-        auroc = roc_auc_score(true_u, all_uncertainties)
+        auroc = roc_auc_score(true_u, unc_logic)
         tp = np.sum((true_u == 1) & (pred_u == 1))
         fp = np.sum((true_u == 0) & (pred_u == 1))
         tn = np.sum((true_u == 0) & (pred_u == 0))
         fn = np.sum((true_u == 1) & (pred_u == 0))
         far = fp / (fp + tn) * 100 if (fp + tn) > 0 else 0.0
         mar = fn / (tp + fn) * 100 if (tp + fn) > 0 else 0.0
-        fpr, tpr, _ = roc_curve(true_u, all_uncertainties)
+        fpr, tpr, _ = roc_curve(true_u, unc_logic)
         plt.figure()
         plt.plot(fpr, tpr, color="darkorange", lw=2, label=f"ROC curve (area = {auroc:.2f})")
         plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
@@ -452,31 +464,39 @@ def evaluate_fi_outputs(
         plt.savefig(os.path.join(output_dir, "roc_curve_nvf.png"), dpi=150)
         plt.close()
 
-        id_unc = all_uncertainties[known_mask]
-        ood_unc = all_uncertainties[unknown_mask]
-        with plt.style.context("default"):
-            plt.figure(figsize=(8, 6))
-            plt.hist(id_unc, bins=30, alpha=0.6, label="ID", density=True)
-            if ood_unc is not None and len(ood_unc) > 0:
-                plt.hist(ood_unc, bins=30, alpha=0.6, label="OOD", density=True)
-            plt.xlabel("OOD score / Uncertainty")
-            plt.ylabel("Density")
-            plt.xlim(0.0, 1.0)
-            plt.xticks(np.arange(0, 1.05, 0.05))
-            plt.title(f"OOD score distribution (AUROC={auroc:.4f})")
-            plt.legend()
-            plt.grid(True, linestyle="--", alpha=0.5)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "uncertainty_distribution_mean_nvf.png"), dpi=150)
-            plt.close()
-
+    # 仅 logic 不确定度评价（分布图 + 文本）
     results_path = os.path.join(output_dir, "binary_test_results_fi.txt")
     with open(results_path, "w", encoding="utf-8") as f:
         f.write(f"Closed-set Accuracy: {accuracy * 100:.2f}%\n")
-        f.write(f"OOD Threshold: {uncertainty_threshold:.6f}\n")
+        f.write(f"OOD Threshold (logic): {uncertainty_threshold:.6f}\n")
         f.write(f"Avg binary acc (over heads): {np.mean(binary_accuracies) * 100:.2f}%\n" if binary_accuracies else "")
         if f1 is not None:
-            f.write(f"F1 OOD: {f1:.4f}\nAUROC: {auroc:.4f}\nFAR: {far:.2f}%\nMAR: {mar:.2f}%\n")
+            f.write(f"F1 OOD (logic score): {f1:.4f}\nAUROC (logic): {auroc:.4f}\nFAR: {far:.2f}%\nMAR: {mar:.2f}%\n")
+        if has_unknown_samples:
+            unc = uncertainties_dict["logic"]
+            true_u = (~known_mask).astype(int)
+            a_m = roc_auc_score(true_u, unc)
+            f.write(f"\nAUROC (logic): {a_m:.4f}\n")
+
+            id_unc = unc[known_mask]
+            ood_unc = unc[unknown_mask]
+            with plt.style.context("default"):
+                plt.figure(figsize=(8, 6))
+                plt.hist(id_unc, bins=50, alpha=0.6, label="ID", density=True)
+                if ood_unc is not None and len(ood_unc) > 0:
+                    plt.hist(ood_unc, bins=50, alpha=0.6, label="OOD", density=True)
+                plt.xlabel("OOD score / Uncertainty")
+                plt.ylabel("Density")
+                umax = float(np.nanmax(unc))
+                if umax <= 1.01:
+                    plt.xlim(0.0, 1.0)
+                    plt.xticks(np.arange(0, 1.05, 0.05))
+                plt.title(f"Uncertainty Distribution (logic) AUROC={a_m:.4f}")
+                plt.legend()
+                plt.grid(True, linestyle="--", alpha=0.5)
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, "uncertainty_distribution_mean_nvf.png"), dpi=150)
+                plt.close()
 
     has_ood_row = np.any(all_labels >= K)
     M = K - 1

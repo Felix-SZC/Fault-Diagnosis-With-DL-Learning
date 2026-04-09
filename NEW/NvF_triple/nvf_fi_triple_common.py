@@ -61,9 +61,12 @@ def fi_triple_edl_mse_loss(
     sample_weight: torch.Tensor | None = None,
     kl_weight: float = 1.0,
     zero_kl_for_other_fault: bool = True,
+    ood_penalty_weight: float = 0.0,
 ) -> torch.Tensor:
     """
-    EDL-MSE：数据项同 edl_mse；若 zero_kl_for_other_fault=True，对 y=[0,0] 的样本 KL 项置零。
+    EDL-MSE：数据项同 edl_mse；
+    若 zero_kl_for_other_fault=True，对 y=[0,0] 的样本 KL 项置零。
+    若 ood_penalty_weight > 0，对 y=[0,0] 的样本增加空不确定度惩罚（让证据趋向于均匀/零）。
     """
     evidence = relu_evidence(logits)
     alpha = evidence + 1
@@ -76,11 +79,25 @@ def fi_triple_edl_mse_loss(
             torch.tensor(1.0, dtype=torch.float32, device=device),
             torch.tensor(float(epoch_num) / float(annealing_step), dtype=torch.float32, device=device),
         )
+
+    # 1. 常规 KL 项：针对已知目标
     kl_alpha = (alpha - 1) * (1.0 - y_triple) + 1.0
     per_kl = annealing_coef * float(kl_weight) * kl_divergence(kl_alpha, 2, device=device)
+
+    is_other = (y_triple.sum(dim=1, keepdim=True) == 0).float()
+
     if zero_kl_for_other_fault:
-        not_other = (y_triple.sum(dim=1, keepdim=True) > 0).float()
-        per_kl = per_kl * not_other
+        per_kl = per_kl * (1.0 - is_other)
+
+    # 2. OOD 惩罚项：针对 y=[0,0] 样本，强制其 alpha 趋向于 [1,1] (即 evidence 趋向 0)
+    # 这相当于对 [0,0] 样本施加特殊的空惩罚
+    if ood_penalty_weight > 0:
+        # 目标是均匀分布（证据全0），即 alpha = [1, 1]
+        target_alpha_ood = torch.ones_like(alpha)
+        # 计算当前 alpha 与全 1 alpha 之间的 KL 散度
+        penalty_kl = kl_divergence(alpha, 2, device=device) # 默认 kl_divergence(alpha, K) 是到全 1 的
+        per_kl = per_kl + ood_penalty_weight * penalty_kl * is_other
+
     per_total = per_ll + per_kl
     if sample_weight is not None:
         sw = sample_weight.to(device).float().view(-1, 1)
@@ -132,6 +149,62 @@ def fi_triple_preds_and_ood(
         torch.where(n_valid >= 1, winner_u, torch.ones(B, device=device, dtype=dtype)),
     )
     return preds, ood_score
+
+
+def fi_triple_multi_ood_scores(
+    p0_stack: torch.Tensor,
+    p1_stack: torch.Tensor,
+    u_stack: torch.Tensor,
+    tau_normal: float = 0.5,
+    tau_fault: float = 0.5,
+) -> dict[str, torch.Tensor]:
+    """
+    返回多种不确定度计算结果。
+    p0/p1/u_stack: [B, M]
+    """
+    device = p0_stack.device
+    B, M = p0_stack.shape
+    dtype = p0_stack.dtype
+
+    # 1. Mean: 平均不确定度
+    s_mean = u_stack.mean(dim=1)
+
+    # 2. Max: 最大不确定度 (对应原版 Normal 时的逻辑)
+    s_max = u_stack.max(dim=1).values
+
+    # 3. Std: 不确定度的离散程度 (度量专家意见的一致性)
+    s_std = u_stack.std(dim=1)
+
+    # 4. Winner: 概率最高模型的不确定度
+    _max_p1, argmax_p1 = p1_stack.max(dim=1)
+    row = torch.arange(B, device=device)
+    s_winner = u_stack[row, argmax_p1]
+
+    # 5. Logic-based (原版逻辑):
+    all_normal = ((p0_stack > tau_normal) & (p1_stack < tau_fault)).all(dim=1)
+    valid_fault = p1_stack > tau_fault
+    inf = torch.tensor(float("inf"), device=device, dtype=dtype)
+    u_masked = torch.where(valid_fault, u_stack, inf)
+    rel_min = u_masked.argmin(dim=1)
+    winner_u = u_stack[row, rel_min]
+    s_logic = torch.where(
+        all_normal,
+        s_max,
+        torch.where(valid_fault.any(dim=1), winner_u, torch.ones(B, device=device)),
+    )
+
+    # 6. Conflict (简易度量): 如果一个模型非常确定是故障，另一个非常确定是正常
+    # 这里用 p1 的分布标准差作为一种“冲突”度量
+    s_conflict = p1_stack.std(dim=1)
+
+    return {
+        "mean": s_mean,
+        "max": s_max,
+        "std": s_std,
+        "winner": s_winner,
+        "logic": s_logic,
+        "conflict": s_conflict,
+    }
 
 
 def discover_epochs_fi(checkpoint_dir: str, K: int) -> list[int]:

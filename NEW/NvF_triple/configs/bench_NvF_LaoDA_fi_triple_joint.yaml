@@ -35,6 +35,14 @@ data:
       - '9齿轮缺齿'
     unknown_classes:
       - '7齿轮断齿'
+  # 数据增强配置
+  augmentation:
+    enable: true                  # 整体开关，阶段一和阶段二均可受益
+    max_shift_ratio: 0.05         # 降低采样相位偏置 (允许最大 5% 的平移)
+    min_max_scale: true           # 降低幅值能量偏置 (随机幅度缩放 0.8~1.2)
+    noise_std_ratio: 0.05         # 提升抗噪鲁棒性 (注入真实信号标准差 5% 的高斯噪声)
+    max_mask_ratio: 0.05           # 抑制对偶然局部噪点或局部伪特征的依赖 (最多遮盖 10% 长度)
+    structure_noise_scale: 0.05   # 降低结构偏移偏置 (添加幅度为 5% 标准差的低频基线漂移)
 
 model:
   type: 'LaoDA'
@@ -59,7 +67,7 @@ train:
     step_size: 40
     gamma: 0.1
 
-  # ---------- 阶段二专用（train_nvf_fi_joint 读取）----------
+    # ---------- 阶段二专用（train_nvf_fi_joint 读取）----------
   fi_joint_finetune:
     # 阶段一权重目录（需含 model_1.pth .. model_{K-1}.pth）
     input_checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_7/stage1'
@@ -73,14 +81,22 @@ train:
     w_other: 1.0
     # true: 监督为 [0,0] 的样本不施加 KL 项（仅保留 loglikelihood 项），减轻与 EDL 先验冲突
     zero_kl_for_other_fault: false
+    # 新增：对 OOD 样本的惩罚权重（让其证据趋向于全0，即 alpha 趋向于 [1,1]）
+    ood_penalty_weight: 0.1
     # >0 时每个 epoch 只用前 N 个 batch（调试）；0 表示全量
     max_batches_per_epoch: 0
+    # 白噪声注入，作为其它不匹配故障[0,0]的监督（阶段二适用）
+    white_noise_injection:
+      enable: true                # 开关
+      ratio: 0.15                 # 噪声样本数占当前 batch size 的比例
+      scale_to_real: true         # 是否将生成的 N(0,1) 噪声缩放至与当前批次数据相同的均值和方差
+      multi_type: true            # 是否开启多样化 OOD 注入 (white, uniform, impulse, sine, pink, zero, const)
 
   test_infer:
     fi_tau_normal: 0.5
     fi_tau_fault: 0.5
     # true: test_NvF_fi_triple 默认逐 epoch 测并写 test_results_all_epochs_fi.csv、best_epoch
-    test_all_epochs: fals
+    test_all_epochs: true
     # 可选：只测部分 epoch（语法同命令行 --test_epochs）；不配则测全部已保存 epoch
-    test_epochs: "299"
+    # test_epochs: "299"
     epoch_save_sample_level_csv: false

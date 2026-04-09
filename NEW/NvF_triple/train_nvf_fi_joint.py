@@ -200,6 +200,7 @@ def get_dataset(data_config, model_type, split="train"):
     openset_config = data_config.get("openset", {})
     known_classes = openset_config.get("known_classes")
     unknown_classes = openset_config.get("unknown_classes", [])
+    augment_config = data_config.get("augmentation", {})
     dataset_cls = NpyPackDataset1D if model_type == "LaoDA" else NpyPackDataset
     return dataset_cls(
         data_dir=data_dir,
@@ -207,6 +208,7 @@ def get_dataset(data_config, model_type, split="train"):
         filter_classes=known_classes,
         known_classes=known_classes,
         unknown_classes=unknown_classes,
+        augment_config=augment_config,
     )
 
 
@@ -260,6 +262,7 @@ def calc_fi_triple_base_loss(
     w_other,
     zero_kl_for_other_fault,
     K,
+    ood_penalty_weight=0.0,
 ):
     """logits_list[i] 对应全局 head 索引 k=i+1。"""
     loss_total = torch.tensor(0.0, device=device)
@@ -277,6 +280,7 @@ def calc_fi_triple_base_loss(
             sample_weight=sw,
             kl_weight=kl_weight,
             zero_kl_for_other_fault=zero_kl_for_other_fault,
+            ood_penalty_weight=ood_penalty_weight,
         )
         loss_total = loss_total + loss_k
     return loss_total / max(M, 1)
@@ -336,7 +340,15 @@ def main():
     w_fault = float(fj.get("w_fault", 1.0))
     w_other = float(fj.get("w_other", 1.0))
     zero_kl_for_other_fault = bool(fj.get("zero_kl_for_other_fault", True))
+    ood_penalty_weight = float(fj.get("ood_penalty_weight", 0.0))
     max_batches = int(fj.get("max_batches_per_epoch", 0))
+
+    wn_inj = fj.get("white_noise_injection", {})
+    wn_enable = bool(wn_inj.get("enable", False))
+    wn_ratio = float(wn_inj.get("ratio", 0.0))
+    wn_scale = bool(wn_inj.get("scale_to_real", False))
+    # 新增开关：是否开启多样化 OOD 注入
+    wn_multi_type = bool(wn_inj.get("multi_type", False))
 
     train_dataset = get_dataset(data_config, backbone_type, split="train")
     val_dataset = get_dataset(data_config, backbone_type, split="test")
@@ -401,10 +413,87 @@ def main():
             m.train()
         train_sum = 0.0
         n_samp = 0
+        n_samp_real = 0 # 统计真实样本数
         train_correct = 0
         for batch_idx, (inputs, labels) in enumerate(train_loader):
             if max_batches > 0 and batch_idx >= max_batches:
                 break
+                
+            # 记录本 batch 注入前的真实样本数
+            curr_bs_real = inputs.size(0)
+
+            if wn_enable and wn_ratio > 0:
+                bs = inputs.size(0)
+                n_noise = int(bs * wn_ratio)
+                if n_noise > 0:
+                    if not wn_multi_type:
+                        # 仅白噪声
+                        noise = torch.randn(n_noise, *inputs.shape[1:])
+                    else:
+                        # 随机选择一种噪声类型
+                        noise_types = ["white", "uniform", "impulse", "sine", "pink", "zero", "const", "mixed"]
+                        selected = np.random.choice(noise_types, size=n_noise)
+                        noise = torch.zeros(n_noise, *inputs.shape[1:])
+                        
+                        # 获取单个样本的总数据量（长度）
+                        flat_len = int(np.prod(inputs.shape[1:]))
+                        
+                        def get_noise_segment(t_type, length):
+                            if t_type == "white":
+                                return torch.randn(length)
+                            elif t_type == "uniform":
+                                return torch.rand(length) * 2 - 1
+                            elif t_type == "impulse":
+                                seg = torch.zeros(length)
+                                n_spikes = max(1, int(length * 0.05))
+                                idx = np.random.choice(length, size=n_spikes, replace=False)
+                                seg[idx] = torch.randn(n_spikes) * 5
+                                return seg
+                            elif t_type == "sine":
+                                freq = np.random.uniform(1, 5)
+                                phase = np.random.uniform(0, 2*np.pi)
+                                x = torch.linspace(0, freq * 2 * np.pi, length)
+                                return torch.sin(x + phase)
+                            elif t_type == "pink":
+                                white = torch.randn(length)
+                                pink = torch.cumsum(white, dim=0)
+                                pink = pink - pink.mean()
+                                if pink.std() > 0: pink = pink / pink.std()
+                                return pink
+                            elif t_type == "zero":
+                                return torch.zeros(length)
+                            elif t_type == "const":
+                                return torch.ones(length) * np.random.uniform(-1, 1)
+                            else:
+                                return torch.randn(length)
+
+                        for i, t in enumerate(selected):
+                            if t == "mixed":
+                                # 随机拼接：将样本分为 2-3 段，每段随机选一种噪声
+                                n_segs = np.random.randint(2, 4)
+                                seg_lens = np.random.multinomial(flat_len, [1/n_segs]*n_segs)
+                                mixed_flat = []
+                                for l in seg_lens:
+                                    if l <= 0: continue
+                                    sub_t = np.random.choice(noise_types[:-1]) # 不再嵌套 mixed
+                                    mixed_flat.append(get_noise_segment(sub_t, l))
+                                noise[i].view(-1).copy_(torch.cat(mixed_flat))
+                            else:
+                                noise[i].view(-1).copy_(get_noise_segment(t, flat_len))
+
+                    if wn_scale:
+                        real_std = inputs.std().item()
+                        real_mean = inputs.mean().item()
+                        # 对随机数进行缩放，对零或常数则主要是为了保持量级一致
+                        noise = noise * real_std + real_mean
+                    noise_labels = torch.full((n_noise,), K, dtype=labels.dtype)
+                    inputs = torch.cat([inputs, noise], dim=0)
+                    labels = torch.cat([labels, noise_labels], dim=0)
+                    # Shuffle to mix noise and real data
+                    perm = torch.randperm(inputs.size(0))
+                    inputs = inputs[perm]
+                    labels = labels[perm]
+
             inputs = inputs.to(device)
             labels = labels.to(device)
             optimizer.zero_grad()
@@ -424,17 +513,29 @@ def main():
                 w_other,
                 zero_kl_for_other_fault,
                 K,
+                ood_penalty_weight=ood_penalty_weight,
             )
             loss.backward()
             optimizer.step()
             bs = inputs.size(0)
             train_sum += loss.item() * bs
             n_samp += bs
+            
             with torch.no_grad():
                 det = [x.detach() for x in logits_list]
-                train_correct += fi_fusion_correct_in_batch(det, labels, device, tau_n, tau_f)
+                # 仅针对真实样本 (label < K) 计算训练精度
+                real_mask = labels < K
+                n_real = real_mask.sum().item()
+                if n_real > 0:
+                    # 过滤出真实样本的 logits 和 labels
+                    real_det = [d[real_mask] for d in det]
+                    real_labels = labels[real_mask]
+                    train_correct += fi_fusion_correct_in_batch(real_det, real_labels, device, tau_n, tau_f)
+                    n_samp_real += n_real
+
         train_loss = train_sum / max(n_samp, 1)
-        train_acc_pct = 100.0 * train_correct / max(n_samp, 1)
+        # 使用真实样本数作为分母，这样精度就能上到 90%+ 甚至 100%
+        train_acc_pct = 100.0 * train_correct / max(n_samp_real, 1)
 
         for m in models:
             m.eval()

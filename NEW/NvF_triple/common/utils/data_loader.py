@@ -2,6 +2,7 @@ import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
+from .augmentation import SignalAugmenter
 
 class NpyPackDataset(Dataset):
     """
@@ -14,8 +15,12 @@ class NpyPackDataset(Dataset):
     def __init__(self, data_dir: str, split: str = 'train', 
                  filter_classes: list = None, 
                  known_classes: list = None,
-                 unknown_classes: list = None):
+                 unknown_classes: list = None,
+                 augment_config: dict = None):
         actual_split = 'test' if split == 'val' else split
+        
+        self.split = split
+        self.augmenter = SignalAugmenter(augment_config) if augment_config else None
         
         x_path = os.path.join(data_dir, f'X_{actual_split}.npy')
         y_path = os.path.join(data_dir, f'y_{actual_split}.npy')
@@ -74,5 +79,9 @@ class NpyPackDataset(Dataset):
         x_sample = self.X[idx]
         # (64, 64) -> (1, 64, 64) 转换为 2D CNN 输入所需的单通道
         tensor = torch.from_numpy(x_sample).float().unsqueeze(0)
+        
+        if self.split == 'train' and self.augmenter is not None:
+            tensor = self.augmenter(tensor)
+            
         label = self.y[idx]
         return tensor, label
