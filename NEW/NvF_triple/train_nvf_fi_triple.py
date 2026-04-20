@@ -153,7 +153,6 @@ def run_fi_only_training(config):
         for epoch in range(num_epochs):
             model.train()
             train_loss = train_correct = train_total = 0.0
-            train_tp = train_fp = train_fn = 0
             for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
                 binary_labels = (labels == k).long()
@@ -183,16 +182,12 @@ def run_fi_only_training(config):
                 train_loss += loss.item() * inputs.size(0)
                 train_correct += (preds == binary_labels).sum().item()
                 train_total += inputs.size(0)
-                train_tp += ((preds == 1) & (binary_labels == 1)).sum().item()
-                train_fp += ((preds == 1) & (binary_labels == 0)).sum().item()
-                train_fn += ((preds == 0) & (binary_labels == 1)).sum().item()
 
             train_loss /= max(len(train_subset), 1)
             train_acc = 100.0 * train_correct / max(train_total, 1)
 
             model.eval()
             val_loss = val_correct = val_total = 0.0
-            val_tp = val_fp = val_fn = 0
             with torch.no_grad():
                 for inputs, labels in val_loader:
                     inputs, labels = inputs.to(device), labels.to(device)
@@ -219,9 +214,6 @@ def run_fi_only_training(config):
                     val_loss += loss.item() * inputs.size(0)
                     val_correct += (preds == binary_labels).sum().item()
                     val_total += inputs.size(0)
-                    val_tp += ((preds == 1) & (binary_labels == 1)).sum().item()
-                    val_fp += ((preds == 1) & (binary_labels == 0)).sum().item()
-                    val_fn += ((preds == 0) & (binary_labels == 1)).sum().item()
 
             val_loss /= max(len(val_subset), 1)
             val_acc = 100.0 * val_correct / max(val_total, 1)

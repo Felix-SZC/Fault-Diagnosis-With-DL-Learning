@@ -154,12 +154,6 @@ def run_test_loop_fi(
     u_rows = []
     lp_rows = []
     ln_rows = []
-    w_pred = []
-    w_pyes = []
-    w_lpos = []
-    w_lneg = []
-    sample_idx = []
-    cursor = 0
 
     with torch.no_grad():
         for inputs, labels in test_loader:
@@ -211,21 +205,6 @@ def run_test_loop_fi(
                     all_preds.append(int(preds_closed[i]))
                 all_labels.append(lbl)
 
-                pc = int(preds_closed[i])
-                w_pred.append(pc)
-                if pc > 0:
-                    j = pc - 1
-                    w_pyes.append(float(p1_stack[i, j].item()))
-                    w_lpos.append(float(lp_stack[i, j].item()))
-                    w_lneg.append(float(ln_stack[i, j].item()))
-                else:
-                    w_pyes.append(float(p1_stack[i].mean().item()))
-                    w_lpos.append(float(lp_stack[i].mean().item()))
-                    w_lneg.append(float(ln_stack[i].mean().item()))
-
-            sample_idx.append(np.arange(cursor, cursor + B, dtype=np.int64))
-            cursor += B
-
     # 对齐 evaluate 接口：仅保留 logic 一项
     final_unc_dict = {"logic": np.array(all_uncertainties)}
 
@@ -240,11 +219,6 @@ def run_test_loop_fi(
         np.concatenate(u_rows, axis=0),
         np.concatenate(lp_rows, axis=0),
         np.concatenate(ln_rows, axis=0),
-        np.array(w_pred, dtype=np.int64),
-        np.array(w_pyes),
-        np.array(w_lpos),
-        np.array(w_lneg),
-        np.concatenate(sample_idx),
     )
 
 
@@ -322,7 +296,6 @@ def evaluate_fi_outputs(
     has_unknown_samples,
     uncertainty_threshold,
     output_dir,
-    save_sample_level_csv=True,
 ):
     os.makedirs(output_dir, exist_ok=True)
     known_mask = all_labels < K
@@ -474,9 +447,7 @@ def evaluate_fi_outputs(
             f.write(f"F1 OOD (logic score): {f1:.4f}\nAUROC (logic): {auroc:.4f}\nFAR: {far:.2f}%\nMAR: {mar:.2f}%\n")
         if has_unknown_samples:
             unc = uncertainties_dict["logic"]
-            true_u = (~known_mask).astype(int)
-            a_m = roc_auc_score(true_u, unc)
-            f.write(f"\nAUROC (logic): {a_m:.4f}\n")
+            f.write(f"\nAUROC (logic): {auroc:.4f}\n")
 
             id_unc = unc[known_mask]
             ood_unc = unc[unknown_mask]
@@ -491,7 +462,7 @@ def evaluate_fi_outputs(
                 if umax <= 1.01:
                     plt.xlim(0.0, 1.0)
                     plt.xticks(np.arange(0, 1.05, 0.05))
-                plt.title(f"Uncertainty Distribution (logic) AUROC={a_m:.4f}")
+                plt.title(f"Uncertainty Distribution (logic) AUROC={auroc:.4f}")
                 plt.legend()
                 plt.grid(True, linestyle="--", alpha=0.5)
                 plt.tight_layout()
@@ -632,7 +603,6 @@ def main():
     tau_normal = float(test_infer.get("fi_tau_normal", 0.5))
     tau_fault = float(test_infer.get("fi_tau_fault", 0.5))
     test_all_epochs = bool(args.test_all_epochs or test_infer.get("test_all_epochs", False))
-    epoch_save_csv = bool(test_infer.get("epoch_save_sample_level_csv", False))
 
     epochs_wanted: list[int] | None = None
     spec_cli = getattr(args, "test_epochs", None)
@@ -709,7 +679,6 @@ def main():
                 has_unknown,
                 thr,
                 ep_dir,
-                save_sample_level_csv=epoch_save_csv,
             )
             all_rows.append((e, m["accuracy"], m.get("f1_score"), m.get("auroc"), m.get("far"), m.get("mar")))
             del models_e
@@ -754,7 +723,6 @@ def main():
         has_unknown,
         thr,
         output_dir,
-        save_sample_level_csv=True,
     )
     print(f"Closed accuracy: {m['accuracy']:.2f}% 结果: {m['results_path']}")
 

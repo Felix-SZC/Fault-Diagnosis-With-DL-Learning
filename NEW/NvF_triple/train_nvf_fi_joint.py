@@ -42,98 +42,6 @@ def _configure_cjk_font():
     plt.rcParams["axes.unicode_minus"] = False
 
 
-def save_fi_stage2_flowchart(save_path: str) -> None:
-    """阶段二训练流程示意（与脚本逻辑一致），存 PNG。"""
-    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
-
-    _configure_cjk_font()
-    fig, ax = plt.subplots(figsize=(9, 11))
-    ax.set_xlim(0, 9)
-    ax.set_ylim(0, 12)
-    ax.axis("off")
-    ax.set_title("Fi-only 阶段二：联合微调训练流程（无 model0）", fontsize=13, pad=12)
-
-    def node(cx, cy, w, h, text, face="#e8f4fc"):
-        x, y = cx - w / 2, cy - h / 2
-        ax.add_patch(
-            FancyBboxPatch(
-                (x, y),
-                w,
-                h,
-                boxstyle="round,pad=0.02,rounding_size=0.1",
-                linewidth=1.1,
-                edgecolor="#333333",
-                facecolor=face,
-            )
-        )
-        ax.text(cx, cy, text, ha="center", va="center", fontsize=9, linespacing=1.25)
-
-    def arr(x0, y0, x1, y1):
-        ax.add_patch(
-            FancyArrowPatch(
-                (x0, y0),
-                (x1, y1),
-                arrowstyle="-|>",
-                mutation_scale=14,
-                color="#444444",
-                lw=1.2,
-            )
-        )
-
-    y = 11.15
-    dy = 1.05
-    node(4.5, y, 7.8, 0.72, "读取 YAML：K、数据、阶段一 input_checkpoint_dir、超参")
-    y -= dy
-    arr(4.5, y + dy / 2 + 0.36, 4.5, y + 0.36)
-    node(4.5, y, 7.8, 0.72, "加载 model_1 … model_{K-1}，按 head_only / train_fc1 设可训练参数")
-    y -= dy
-    arr(4.5, y + dy / 2 + 0.36, 4.5, y + 0.36)
-    node(4.5, y, 7.8, 0.72, "构建闭集 train / test DataLoader（仅 known_classes）")
-    y -= dy
-    arr(4.5, y + dy / 2 + 0.36, 4.5, y + 0.36)
-    node(
-        4.5,
-        y,
-        7.8,
-        1.0,
-        "每个 epoch：\n训练模式 → 逐 batch 各头前向 → 三态 y + sample_weight\n→ fi_triple_edl_mse_loss 对 K-1 头取平均 → backward + step",
-        face="#fff3e0",
-    )
-    y -= dy + 0.15
-    arr(4.5, y + dy / 2 + 0.5, 4.5, y + 0.36)
-    node(
-        4.5,
-        y,
-        7.8,
-        0.88,
-        "同步累计：训练集加权平均 loss；Fi 融合闭集准确率（与 test 相同阈值）",
-        face="#e8f5e9",
-    )
-    y -= dy + 0.05
-    arr(4.5, y + dy / 2 + 0.44, 4.5, y + 0.36)
-    node(
-        4.5,
-        y,
-        7.8,
-        1.0,
-        "验证集 no_grad：同上 loss + 准确率\n→ 记录 hist；若 val_loss 更优则保存各 model_k.pth",
-        face="#fce4ec",
-    )
-    y -= dy + 0.15
-    arr(4.5, y + dy / 2 + 0.5, 4.5, y + 0.36)
-    node(4.5, y, 7.8, 0.72, "若 save_every_epoch：写入 epochs/<e>/model_*.pth")
-    y -= dy
-    arr(4.5, y + dy / 2 + 0.36, 4.5, y + 0.36)
-    node(4.5, y, 7.8, 0.72, "每个 epoch 更新 training_curves_fi_joint.png 与 joint_history.csv（实时落盘）")
-    y -= dy
-    arr(4.5, y + dy / 2 + 0.36, 4.5, y + 0.36)
-    node(4.5, y, 7.8, 0.72, "训练结束：再写最终权重与实验信息", face="#ede7f6")
-
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
 def fi_fusion_correct_in_batch(
     logits_list: list, labels: torch.Tensor, device: torch.device, tau_n: float, tau_f: float
 ) -> int:
@@ -320,10 +228,6 @@ def main():
     tau_n = float(test_infer.get("fi_tau_normal", 0.5))
     tau_f = float(test_infer.get("fi_tau_fault", 0.5))
 
-    flow_png = os.path.join(checkpoint_dir, "fi_stage2_training_flow.png")
-    save_fi_stage2_flowchart(flow_png)
-    print(f"已保存阶段二训练流程图: {flow_png}")
-
     batch_size = int(train_config.get("batch_size", 256))
     num_workers = int(train_config.get("num_workers", 4))
     pin_memory = bool(train_config.get("pin_memory", True))
@@ -435,9 +339,6 @@ def main():
         for batch_idx, (inputs, labels) in enumerate(train_loader):
             if max_batches > 0 and batch_idx >= max_batches:
                 break
-                
-            # 记录本 batch 注入前的真实样本数
-            curr_bs_real = inputs.size(0)
 
             if wn_enable and wn_ratio > 0:
                 bs = inputs.size(0)
