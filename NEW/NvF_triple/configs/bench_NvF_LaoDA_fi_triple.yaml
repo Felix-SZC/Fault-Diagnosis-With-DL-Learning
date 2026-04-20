@@ -16,16 +16,15 @@ data:
     # 闭集已知类顺序决定标签 0..K-1（首项一般为正常）
     known_classes:
       - '1正常'
-      - '2轴承内圈'
       - '3轴承外圈'
       - '4轴承滚子'
       - '5轴承组合'
       - '6齿根裂纹'
+      - '7齿轮断齿'
       - '8齿轮点蚀'
       - '9齿轮缺齿'
-    # 测试集可含未知类；训练集仍只使用 known_classes
     unknown_classes:
-      - '7齿轮断齿'
+      - '2轴承内圈'
   # 数据增强配置
   augmentation:
     enable: true                  # 整体开关，阶段一和阶段二均可受益
@@ -44,7 +43,7 @@ train:
   batch_size: 256
   learning_rate: 0.0005
   # 阶段一输出：model_1.pth .. model_{K-1}.pth（无 model_0.pth）
-  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_7/stage1'
+  checkpoint_dir: 'checkpoints/LaoDA/bench_NvF_fi_triple/OOD_2/stage1'
   # true 时每个 epoch 额外写入 epochs/<e>/model_*.pth（阶段二逐轮测试需要）
   save_every_epoch: false
   notes: 'Fi-only stage1 (no model0)'
@@ -57,7 +56,7 @@ train:
   weight_decay: 0.0005
   seed: 42
   scheduler:
-    use_scheduler: false
+    use_scheduler: True
     scheduler_type: 'StepLR'
     step_size: 40
     gamma: 0.1

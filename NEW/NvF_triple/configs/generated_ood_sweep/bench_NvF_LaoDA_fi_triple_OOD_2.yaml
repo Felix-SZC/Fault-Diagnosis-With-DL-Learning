@@ -1,0 +1,52 @@
+data:
+  augmentation:
+    enable: true
+    max_mask_ratio: 0.1
+    max_shift_ratio: 0.05
+    min_max_scale: true
+    noise_std_ratio: 0.05
+    structure_noise_scale: 0.05
+  data_dir: ../Kong_code&&data/数据打包/2
+  openset:
+    known_classes:
+    - 1正常
+    - 3轴承外圈
+    - 4轴承滚子
+    - 5轴承组合
+    - 6齿根裂纹
+    - 7齿轮断齿
+    - 8齿轮点蚀
+    - 9齿轮缺齿
+    unknown_classes:
+    - 2轴承内圈
+model:
+  type: LaoDA
+train:
+  batch_size: 256
+  checkpoint_dir: checkpoints/LaoDA/bench_NvF_fi_triple/OOD_2/stage1
+  device: cuda
+  edl_annealing_step: 80
+  edl_loss_type: mse
+  ensemble_strategy: Normal_vs_Fault_i
+  kl_weight: 1.0
+  learning_rate: 0.0005
+  momentum: 0.9
+  notes: Fi-only stage1 (no model0)
+  num_epochs: 80
+  optimizer: Adam
+  save_every_epoch: false
+  scheduler:
+    gamma: 0.1
+    scheduler_type: StepLR
+    step_size: 40
+    use_scheduler: false
+  seed: 42
+  test_infer:
+    epoch_save_sample_level_csv: false
+    fi_tau_fault: 0.5
+    fi_tau_normal: 0.5
+    test_all_epochs: false
+  weight_decay: 0.0005
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true

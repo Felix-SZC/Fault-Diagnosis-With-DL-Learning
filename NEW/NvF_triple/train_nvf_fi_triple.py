@@ -56,6 +56,9 @@ def run_fi_only_training(config):
         raise ValueError("Fi-only 至少需要 1 个正常类 + 1 个故障类（K>=2）")
 
     batch_size = train_config.get("batch_size", 32)
+    num_workers = int(train_config.get("num_workers", 4))
+    pin_memory = bool(train_config.get("pin_memory", True))
+    persistent_workers = bool(train_config.get("persistent_workers", True))
     backbone_type = model_config.get("type", "LaoDA")
     train_dataset = get_dataset(data_config, backbone_type, split="train")
     val_dataset = get_dataset(data_config, backbone_type, split="test")
@@ -114,8 +117,22 @@ def run_fi_only_training(config):
         val_pos = int(np.sum(val_dataset.y[val_indices] == k))
         val_neg = int(np.sum(val_dataset.y[val_indices] == 0))
 
-        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=(persistent_workers and num_workers > 0),
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=(persistent_workers and num_workers > 0),
+        )
         print(f"  训练集: 正类(故障{k})={train_pos}, 负类(正常)={train_neg}")
         print(f"  验证集: 正类={val_pos}, 负类={val_neg}")
 
@@ -229,6 +246,9 @@ def run_fi_only_training(config):
         path_k = os.path.join(checkpoint_dir, f"model_{k}.pth")
         if not os.path.exists(path_k):
             torch.save({"state_dict": model.state_dict(), "k": k, "best_val_acc": best_val_acc}, path_k)
+        # 始终额外保存最后一轮权重，便于与 best 做对照测试。
+        path_last_k = os.path.join(checkpoint_dir, f"model_last_{k}.pth")
+        torch.save({"state_dict": model.state_dict(), "k": k, "tag": "last_epoch"}, path_last_k)
         print(f"模型 k={k} 已保存: {path_k}, best_val_acc={best_val_acc:.2f}%")
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))

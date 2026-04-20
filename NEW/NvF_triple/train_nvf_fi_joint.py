@@ -325,6 +325,9 @@ def main():
     print(f"已保存阶段二训练流程图: {flow_png}")
 
     batch_size = int(train_config.get("batch_size", 256))
+    num_workers = int(train_config.get("num_workers", 4))
+    pin_memory = bool(train_config.get("pin_memory", True))
+    persistent_workers = bool(train_config.get("persistent_workers", True))
     num_epochs = int(train_config.get("num_epochs", 50))
     learning_rate = float(train_config.get("learning_rate", 1e-4))
     device = torch.device(train_config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -352,8 +355,22 @@ def main():
 
     train_dataset = get_dataset(data_config, backbone_type, split="train")
     val_dataset = get_dataset(data_config, backbone_type, split="test")
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(persistent_workers and num_workers > 0),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(persistent_workers and num_workers > 0),
+    )
 
     models = load_models_fi(input_ckpt_dir, K, backbone_type, device)
     for m in models:
@@ -621,6 +638,9 @@ def main():
         p = os.path.join(checkpoint_dir, f"model_{k}.pth")
         if not os.path.exists(p):
             torch.save({"state_dict": models[k - 1].state_dict(), "k": k}, p)
+        # 始终保存最后一轮权重，避免开启 save_every_epoch 才能拿到 last。
+        p_last = os.path.join(checkpoint_dir, f"model_last_{k}.pth")
+        torch.save({"state_dict": models[k - 1].state_dict(), "k": k, "tag": "last_epoch"}, p_last)
 
     if _LIVE_PLOT and live_bundle is not None:
         plt.ioff()
