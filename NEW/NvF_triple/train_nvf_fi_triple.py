@@ -18,14 +18,13 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from common.utils.helpers import load_config, save_experiment_info
-from common.utils.data_loader import NpyPackDataset
 from common.utils.data_loader_1d import NpyPackDataset1D
 from common.edl_losses import relu_evidence
 from common.utils.edl_helpers import one_hot_embedding
 from models import get_model
 
 
-def get_dataset(data_config, model_type, split="train"):
+def get_dataset(data_config, split="train"):
     data_dir = data_config.get("data_dir")
     if data_dir is None:
         raise ValueError("配置文件中必须指定 data.data_dir")
@@ -35,8 +34,7 @@ def get_dataset(data_config, model_type, split="train"):
     if known_classes is None:
         raise ValueError("配置文件中必须指定 data.openset.known_classes")
     augment_config = data_config.get("augmentation", {})
-    dataset_cls = NpyPackDataset1D if model_type == "LaoDA" else NpyPackDataset
-    return dataset_cls(
+    return NpyPackDataset1D(
         data_dir=data_dir,
         split=split,
         filter_classes=known_classes,
@@ -49,7 +47,6 @@ def get_dataset(data_config, model_type, split="train"):
 def run_fi_only_training(config):
     data_config = config["data"]
     train_config = config["train"]
-    model_config = config["model"]
 
     K = len(data_config["openset"]["known_classes"])
     if K < 2:
@@ -59,9 +56,8 @@ def run_fi_only_training(config):
     num_workers = int(train_config.get("num_workers", 4))
     pin_memory = bool(train_config.get("pin_memory", True))
     persistent_workers = bool(train_config.get("persistent_workers", True))
-    backbone_type = model_config.get("type", "LaoDA")
-    train_dataset = get_dataset(data_config, backbone_type, split="train")
-    val_dataset = get_dataset(data_config, backbone_type, split="test")
+    train_dataset = get_dataset(data_config, split="train")
+    val_dataset = get_dataset(data_config, split="test")
 
     device = torch.device(train_config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
     annealing_step = int(train_config.get("edl_annealing_step", 10))
@@ -137,7 +133,7 @@ def run_fi_only_training(config):
         print(f"  验证集: 正类={val_pos}, 负类={val_neg}")
 
         torch.manual_seed(int(train_config.get("seed", 42)))
-        model = get_model(backbone_type, **model_kw).to(device)
+        model = get_model("LaoDA", **model_kw).to(device)
         if optimizer_type == "SGD":
             optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
         else:

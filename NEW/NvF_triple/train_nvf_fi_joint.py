@@ -23,7 +23,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from common.utils.helpers import load_config, save_experiment_info
-from common.utils.data_loader import NpyPackDataset
 from common.utils.data_loader_1d import NpyPackDataset1D
 from common.edl_losses import relu_evidence
 from common.utils.lao_da_pretrained import summarize_trainable_params
@@ -103,14 +102,13 @@ def save_training_curves_fi_joint(
         plt.close(fig)
 
 
-def get_dataset(data_config, model_type, split="train"):
+def get_dataset(data_config, split="train"):
     data_dir = data_config.get("data_dir")
     openset_config = data_config.get("openset", {})
     known_classes = openset_config.get("known_classes")
     unknown_classes = openset_config.get("unknown_classes", [])
     augment_config = data_config.get("augmentation", {})
-    dataset_cls = NpyPackDataset1D if model_type == "LaoDA" else NpyPackDataset
-    return dataset_cls(
+    return NpyPackDataset1D(
         data_dir=data_dir,
         split=split,
         filter_classes=known_classes,
@@ -120,37 +118,27 @@ def get_dataset(data_config, model_type, split="train"):
     )
 
 
-def set_trainable_for_joint(model, backbone_type, head_only=True, train_fc1=False):
+def set_trainable_for_joint(model, head_only=True, train_fc1=False):
     if not head_only:
         for _, p in model.named_parameters():
             p.requires_grad = True
         return
     for _, p in model.named_parameters():
         p.requires_grad = False
-    if backbone_type == "LaoDA":
-        for n, p in model.named_parameters():
-            if n.startswith("fc2."):
-                p.requires_grad = True
-            elif train_fc1 and n.startswith("fc1."):
-                p.requires_grad = True
-        return
-    if hasattr(model, "fc"):
-        for n, p in model.named_parameters():
-            if n.startswith("fc."):
-                p.requires_grad = True
-        return
     for n, p in model.named_parameters():
-        if "fc" in n:
+        if n.startswith("fc2."):
+            p.requires_grad = True
+        elif train_fc1 and n.startswith("fc1."):
             p.requires_grad = True
 
 
-def load_models_fi(checkpoint_dir, K, backbone_type, device):
+def load_models_fi(checkpoint_dir, K, device):
     models = []
     for k in range(1, K):
         path_k = os.path.join(checkpoint_dir, f"model_{k}.pth")
         if not os.path.exists(path_k):
             raise FileNotFoundError(f"未找到 Fi-only 权重: {path_k}")
-        m = get_model(backbone_type, num_classes=2).to(device)
+        m = get_model("LaoDA", num_classes=2).to(device)
         ckpt = torch.load(path_k, map_location=device, weights_only=True)
         state = ckpt.get("state_dict") or ckpt.get("model_state_dict") or ckpt
         m.load_state_dict(state, strict=True)
@@ -205,14 +193,12 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     data_config = config["data"]
-    model_config = config["model"]
     train_config = config["train"]
     fj = train_config.get("fi_joint_finetune", {})
 
     K = len(data_config["openset"]["known_classes"])
     if K < 2:
         raise ValueError("K 至少为 2")
-    backbone_type = model_config.get("type", "LaoDA")
     input_ckpt_dir = fj.get("input_checkpoint_dir")
     if not input_ckpt_dir:
         raise ValueError("请在 train.fi_joint_finetune.input_checkpoint_dir 指定阶段一权重目录")
@@ -257,8 +243,8 @@ def main():
     # 新增开关：是否开启多样化 OOD 注入
     wn_multi_type = bool(wn_inj.get("multi_type", False))
 
-    train_dataset = get_dataset(data_config, backbone_type, split="train")
-    val_dataset = get_dataset(data_config, backbone_type, split="test")
+    train_dataset = get_dataset(data_config, split="train")
+    val_dataset = get_dataset(data_config, split="test")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -276,9 +262,9 @@ def main():
         persistent_workers=(persistent_workers and num_workers > 0),
     )
 
-    models = load_models_fi(input_ckpt_dir, K, backbone_type, device)
+    models = load_models_fi(input_ckpt_dir, K, device)
     for m in models:
-        set_trainable_for_joint(m, backbone_type, head_only=head_only, train_fc1=train_fc1)
+        set_trainable_for_joint(m, head_only=head_only, train_fc1=train_fc1)
 
     params = []
     for idx, m in enumerate(models):

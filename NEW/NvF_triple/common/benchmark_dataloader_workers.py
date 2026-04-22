@@ -63,8 +63,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     data_cfg = cfg["data"]
-    model_type = cfg.get("model", {}).get("type", "LaoDA")
-    ds = get_dataset(data_cfg, model_type, split=args.split, filter_classes=None)
+    ds = get_dataset(data_cfg, split=args.split, filter_classes=None)
 
     worker_list = [int(x.strip()) for x in args.workers.split(",") if x.strip()]
     results: list[tuple[int, float]] = []

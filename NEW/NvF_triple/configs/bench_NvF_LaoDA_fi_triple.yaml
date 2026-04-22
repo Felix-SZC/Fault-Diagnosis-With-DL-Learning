@@ -10,7 +10,7 @@
 # =========================================================
 
 data:
-  # npy 数据根目录（相对 ResNet2d_EDL_EnsembleBinary 工作目录）
+  # npy 数据根目录（相对 NvF_triple 工作目录）
   data_dir: '../Kong_code&&data/数据打包/2'
   openset:
     # 闭集已知类顺序决定标签 0..K-1（首项一般为正常）

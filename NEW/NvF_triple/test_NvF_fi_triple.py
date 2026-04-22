@@ -25,7 +25,6 @@ sys.path.append(current_dir)
 
 from common.edl_losses import relu_evidence
 from common.utils.helpers import load_config
-from common.utils.data_loader import NpyPackDataset
 from common.utils.data_loader_1d import NpyPackDataset1D
 from models import get_model
 
@@ -74,13 +73,12 @@ def filter_discovered_epochs(discovered: list[int], wanted: list[int] | None) ->
     return use, missing
 
 
-def get_dataset(data_config, model_type, split="test", filter_classes=None):
+def get_dataset(data_config, split="test", filter_classes=None):
     data_dir = data_config.get("data_dir")
     openset_config = data_config.get("openset", {})
     known_classes = openset_config.get("known_classes")
     unknown_classes = openset_config.get("unknown_classes", [])
-    dataset_cls = NpyPackDataset1D if model_type == "LaoDA" else NpyPackDataset
-    return dataset_cls(
+    return NpyPackDataset1D(
         data_dir=data_dir,
         split=split,
         filter_classes=filter_classes,
@@ -89,7 +87,7 @@ def get_dataset(data_config, model_type, split="test", filter_classes=None):
     )
 
 
-def load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=None):
+def load_models_fi(checkpoint_dir, K, device, epoch=None):
     models = []
     for k in range(1, K):
         if epoch is None:
@@ -98,7 +96,7 @@ def load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=None):
             path_k = os.path.join(checkpoint_dir, "epochs", str(epoch), f"model_{k}.pth")
         if not os.path.exists(path_k):
             raise FileNotFoundError(path_k)
-        m = get_model(backbone_type, num_classes=2).to(device)
+        m = get_model("LaoDA", num_classes=2).to(device)
         ckpt = torch.load(path_k, map_location=device, weights_only=True)
         state = ckpt.get("state_dict") or ckpt.get("model_state_dict") or ckpt
         m.load_state_dict(state, strict=True)
@@ -595,7 +593,6 @@ def main():
 
     config = load_config(args.config)
     data_config = config["data"]
-    model_config = config["model"]
     train_config = config["train"]
     test_infer = train_config.get("test_infer", {})
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -624,10 +621,9 @@ def main():
 
     known_classes = data_config["openset"]["known_classes"]
     K = len(known_classes)
-    backbone_type = model_config.get("type", "LaoDA")
     batch_size = int(train_config.get("batch_size", 32))
 
-    test_dataset = get_dataset(data_config, backbone_type, split="test", filter_classes=None)
+    test_dataset = get_dataset(data_config, split="test", filter_classes=None)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     has_unknown = np.any(test_dataset.y >= K)
     print(f"Fi-only 测试 K={K}, M={K - 1}, device={device}")
@@ -653,14 +649,14 @@ def main():
         plot_root = os.path.join(output_dir, "epochs")
         os.makedirs(plot_root, exist_ok=True)
         if args.threshold_from_val:
-            val_ds = get_dataset(data_config, backbone_type, split="test", filter_classes=known_classes)
+            val_ds = get_dataset(data_config, split="test", filter_classes=known_classes)
             val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
             models0 = None
             try:
-                models0 = load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=None)
+                models0 = load_models_fi(checkpoint_dir, K, device, epoch=None)
             except FileNotFoundError:
                 e0 = epochs[0]
-                models0 = load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=e0)
+                models0 = load_models_fi(checkpoint_dir, K, device, epoch=e0)
                 print(
                     f"提示: checkpoint 根目录无 model_1..pth，IQR 阈值改用 epochs/{e0}/ 权重估计"
                 )
@@ -669,7 +665,7 @@ def main():
         else:
             thr = args.uncertainty_threshold
         for e in epochs:
-            models_e = load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=e)
+            models_e = load_models_fi(checkpoint_dir, K, device, epoch=e)
             packs = run_test_loop_fi(models_e, test_loader, device, K, thr, tau_normal, tau_fault)
             ep_dir = os.path.join(plot_root, str(e))
             m = evaluate_fi_outputs(
@@ -705,9 +701,9 @@ def main():
         print(f"best_epoch={best[0]} -> {best_dst}（已写入 {os.path.join(best_dst, 'selected_epoch.txt')}）")
         return
 
-    models = load_models_fi(checkpoint_dir, K, backbone_type, device, epoch=None)
+    models = load_models_fi(checkpoint_dir, K, device, epoch=None)
     if args.threshold_from_val:
-        val_ds = get_dataset(data_config, backbone_type, split="test", filter_classes=known_classes)
+        val_ds = get_dataset(data_config, split="test", filter_classes=known_classes)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
         thr = compute_uncertainty_threshold_iqr_fi(val_loader, models, device, K, tau_normal, tau_fault)
         print(f"IQR 阈值: {thr:.4f}")
